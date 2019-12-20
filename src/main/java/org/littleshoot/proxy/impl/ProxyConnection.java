@@ -243,13 +243,27 @@ abstract class ProxyConnection<I extends HttpObject> extends
      * @param httpObject
      */
     protected void writeHttp(HttpObject httpObject) {
+        ChannelFuture channelFuture;
         if (ProxyUtils.isLastChunk(httpObject)) {
             channel.write(httpObject);
             LOG.debug("Writing an empty buffer to signal the end of our chunked transfer");
-            writeToChannel(Unpooled.EMPTY_BUFFER);
+            channelFuture = writeToChannel(Unpooled.EMPTY_BUFFER);
         } else {
-            writeToChannel(httpObject);
+            channelFuture = writeToChannel(httpObject);
         }
+        channelFuture.addListener(future -> {
+            if (future.isSuccess()) {
+                if (httpObject instanceof ReferenceCounted) {
+                    LOG.info("WriteHttp: Write to channel succeeded. Releasing HttpObject.");
+                    try{
+                        ((ReferenceCounted)httpObject).release();
+                    }catch (final Exception ex){
+                        // Catching all exceptions to avoid any interruption to the flow.
+                        LOG.warn("WriteHttp: Unable to release HttpObject. {}",ex);
+                    }
+                }
+            }
+        });
     }
 
     /**
