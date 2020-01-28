@@ -6,6 +6,7 @@ import io.netty.channel.*;
 import io.netty.handler.codec.http.*;
 import io.netty.handler.ssl.SslHandler;
 import io.netty.handler.timeout.IdleStateEvent;
+import io.netty.util.ReferenceCountUtil;
 import io.netty.util.ReferenceCounted;
 import io.netty.util.concurrent.Future;
 import io.netty.util.concurrent.GenericFutureListener;
@@ -139,6 +140,7 @@ abstract class ProxyConnection<I extends HttpObject> extends
                 // response from a filter. The client may have sent some chunked HttpContent associated with the request
                 // after the short-circuit response was sent. We can safely drop them.
                 LOG.debug("Dropping message because HTTP object was not an HttpMessage. HTTP object may be orphaned content from a short-circuited response. Message: {}", httpObject);
+                ReferenceCountUtil.release(httpObject);
             }
             break;
         case AWAITING_CHUNK:
@@ -157,6 +159,7 @@ abstract class ProxyConnection<I extends HttpObject> extends
                 // can happen if the connected host already sent us some chunks
                 // (e.g. from a POST) after an initial request that turned out
                 // to require authentication.
+                ReferenceCountUtil.release(httpObject);
             }
             break;
         case CONNECTING:
@@ -176,6 +179,7 @@ abstract class ProxyConnection<I extends HttpObject> extends
         case DISCONNECT_REQUESTED:
         case DISCONNECTED:
             LOG.info("Ignoring message since the connection is closed or about to close");
+            ReferenceCountUtil.release(httpObject);
             break;
         }
     }
