@@ -277,7 +277,8 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
                 become(AWAITING_CHUNK);
             } else {
                 ReferenceCountUtil.retain(httpResponse);
-
+                LOG.debug("VMWARE channelRead RespondToClientHandler - Retained httpResponse:{}. refcnt: {}", 
+                        httpResponse.hashCode(), ReferenceCountUtil.refCnt(httpResponse));
                 proxyServer.getMessageProcessingExecutor()
                     .execute(() -> {
                       try {
@@ -290,6 +291,8 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
                           exceptionCaught(ctx, e);
                       } finally {
                           ReferenceCountUtil.release(httpResponse);
+                          LOG.error("VMWARE channelRead RespondToClientHandler - Released httpResponse:{}. refcnt: {}",
+                                  httpResponse.hashCode(), ReferenceCountUtil.refCnt(httpResponse));
                       }
                     });
             }
@@ -371,10 +374,11 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
         LOG.debug("Requested write of {}", msg);
 
         if (msg instanceof ReferenceCounted) {
-            LOG.debug("Retaining reference counted message");
             ((ReferenceCounted) msg).retain();
+            LOG.debug("VMWARE write ProxytoServerCon - Retained msg:{}. refcnt: {}", 
+                    msg.hashCode(), ReferenceCountUtil.refCnt(msg));
         }
-
+        
         if (is(DISCONNECTED) && msg instanceof HttpRequest) {
             LOG.debug("Currently disconnected, connect and then write the message");
             connectAndWrite((HttpRequest) msg);
@@ -392,7 +396,7 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
                     }
                 }
             }
-
+            
             // only write this message if a connection was established and is not in the process of disconnecting or
             // already disconnected
             if (isConnecting() || getCurrentState().isDisconnectingOrDisconnected()) {
@@ -400,7 +404,11 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
 
                 // release when disconnected.
                 if (initialRequest instanceof ReferenceCounted) {
-                    ((ReferenceCounted)initialRequest).release();
+//                    ((ReferenceCounted)initialRequest).release();
+                    final int refCnt = ReferenceCountUtil.refCnt(initialRequest);
+                    ReferenceCountUtil.release(initialRequest, refCnt);
+                    LOG.debug("VMWARE write ProxytoServerCon - releasing msg/initialRequest:{}. refCount: {}", 
+                            initialRequest.hashCode(), ReferenceCountUtil.refCnt(initialRequest));
                 }
 
                 return;
@@ -747,6 +755,8 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
 
                 LOG.debug("Retaining reference counted message");
                 ((ReferenceCounted) initialRequest).retain();
+                LOG.debug("VMWARE ConnectionFlowStep - Retaining initialRequest. refcnt: {}", 
+                        ReferenceCountUtil.refCnt(initialRequest));
             }
 
             if(isMitmEnabled){
@@ -838,11 +848,12 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
         }
     };
 
-    private static HttpRequest copyAsFull(HttpRequest origin) {
+    private HttpRequest copyAsFull(HttpRequest origin) {
         HttpRequest request = null;
         if (origin instanceof FullHttpRequest) {
             request = origin;
             ReferenceCountUtil.retain(request);
+            LOG.debug("VMWARE copyAsFull ProxytoServerCon - Retained request:{}. refcnt: {}", request.hashCode(), ReferenceCountUtil.refCnt(request));
         } else {
             request = new DefaultFullHttpRequest(origin.getProtocolVersion(), origin.getMethod(), origin.getUri());
             if(origin.headers() != null){
@@ -1118,7 +1129,9 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
                 write(initialRequest);
             }
         } else {
-            LOG.debug("Dropping initial request: {}", initialRequest);
+            LOG.debug("VMWARE - Dropping initial request: {}, refCnt: {}", initialRequest.hashCode(), 
+                    ReferenceCountUtil.refCnt(initialRequest));
+//            ReferenceCountUtil.release(initialRequest, ReferenceCountUtil.refCnt(initialRequest));
         }
 
     }

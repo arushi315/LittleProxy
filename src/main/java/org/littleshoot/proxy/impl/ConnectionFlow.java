@@ -1,5 +1,6 @@
 package org.littleshoot.proxy.impl;
 
+import io.netty.util.ReferenceCountUtil;
 import io.netty.util.ReferenceCounted;
 import io.netty.util.concurrent.Future;
 import io.netty.util.concurrent.GenericFutureListener;
@@ -185,9 +186,13 @@ class ConnectionFlow {
                 // we're now done with the initialRequest: it's either been forwarded to the upstream server (HTTP requests), or
                 // completely dropped (HTTPS CONNECTs). if the initialRequest is reference counted (typically because the HttpObjectAggregator is in
                 // the pipeline to generate FullHttpRequests), we need to manually release it to avoid a memory leak.
-                if (serverConnection.getInitialRequest() instanceof ReferenceCounted) {
-                    ((ReferenceCounted)serverConnection.getInitialRequest()).release();
-                }
+//                if (serverConnection.getInitialRequest() instanceof ReferenceCounted) {
+//                    ((ReferenceCounted)serverConnection.getInitialRequest()).release();
+                    final int refCnt = ReferenceCountUtil.refCnt(serverConnection.getInitialRequest());
+                    serverConnection.getLOG().debug("VMWARE ConnectionFlow - Releasing initialRequest:{}. refCount: {}", 
+                            serverConnection.getInitialRequest().hashCode(), refCnt);
+                    ReferenceCountUtil.release(serverConnection.getInitialRequest(), refCnt);
+//                }
             }
         }
     }

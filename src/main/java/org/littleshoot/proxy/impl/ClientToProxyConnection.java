@@ -187,7 +187,7 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
     @Override
     protected ConnectionState readHTTPInitial(ChannelHandlerContext ctx, Object httpRequestObj) {
         HttpRequest httpRequest = (HttpRequest) httpRequestObj;
-        LOG.debug("Received raw request: {}", httpRequest);
+        LOG.debug("Received raw refCnt: {}, request: {}", ReferenceCountUtil.refCnt(httpRequest), httpRequest);
 
         // if we cannot parse the request, immediately return a 400 and close the connection, since we do not know what state
         // the client thinks the connection is in
@@ -358,7 +358,8 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
                 process(ctx, httpRequest, true);
             } else {
                 ReferenceCountUtil.retain(httpRequest);
-
+                LOG.debug("VMWARE channelRead ClientToProxyMessageProcessor - Retained httpRequest:{}. refcnt: {}", 
+                        httpRequest.hashCode(), ReferenceCountUtil.refCnt(httpRequest));
                 proxyServer.getMessageProcessingExecutor()
                     .execute(() -> {
                         try {
@@ -366,7 +367,11 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
                         } catch (Exception e) {
                             ctx.fireExceptionCaught(e);
                         } finally {
+                            LOG.debug("VMWARE channelRead ClientToProxyMessageProcessor - Releasing httpRequest:{}. refcnt: {}",
+                                    httpRequest.hashCode(), ReferenceCountUtil.refCnt(httpRequest));
                             ReferenceCountUtil.release(httpRequest);
+                            LOG.debug("VMWARE channelRead ClientToProxyMessageProcessor - Released httpRequest:{}. refcnt: {}", 
+                                    httpRequest.hashCode(), ReferenceCountUtil.refCnt(httpRequest));
                         }
                     });
             }
@@ -390,7 +395,11 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
                     filterInstance = proxyServer.getFiltersSource().filterRequest(currentRequest, ctx);
                 } finally {
                     // releasing a copied http request
+                    LOG.debug("VMWARE process ClientToProxyMessageProcessor - Releasing currentRequest:{}. refcnt: {}",
+                            currentRequest.hashCode(), ReferenceCountUtil.refCnt(currentRequest));
                     ReferenceCountUtil.release(currentRequest);
+                    LOG.debug("VMWARE process ClientToProxyMessageProcessor - Released currentRequest:{}. refcnt: {}", 
+                            currentRequest.hashCode(), ReferenceCountUtil.refCnt(currentRequest));
                 }
                 if (filterInstance != null) {
                     currentFilters = filterInstance;
@@ -405,6 +414,8 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
                     ctx.fireChannelRead(new UpstreamConnectionHandler.Request(httpRequest, shortCircuitResponse));
                 } else {
                     ReferenceCountUtil.retain(httpRequest);
+                    LOG.debug("VMWARE process ClientToProxyMessageProcessor - Retained httpRequest:{}. refcnt: {}", 
+                            httpRequest.hashCode(), ReferenceCountUtil.refCnt(httpRequest));
                     channel.eventLoop().execute(() -> {
                         try {
                             wrapTask(() ->
@@ -413,6 +424,8 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
                             ).run();
                         } finally {
                             ReferenceCountUtil.release(httpRequest);
+                            LOG.error("VMWARE process ClientToProxyMessageProcessor - Released httpRequest:{}. refcnt: {}", 
+                                    httpRequest.hashCode(), ReferenceCountUtil.refCnt(httpRequest));
                         }
                     });
                 }
@@ -471,6 +484,7 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
         currentFilters.clientToProxyRequest(chunk);
         currentFilters.proxyToServerRequest(chunk);
 
+        LOG.debug("VMWARE readHTTPChunk - Chunk:{}. refcnt: {}", chunk.hashCode(), ReferenceCountUtil.refCnt(chunk));
         currentServerConnection.write(chunk);
     }
 
@@ -1345,6 +1359,13 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
      * @return true if the connection will be kept open, or false if it will be disconnected.
      */
     private boolean respondWithShortCircuitResponse(HttpResponse httpResponse) {
+        /*final int refCnt = ReferenceCountUtil.refCnt(httpRequest);
+        if(refCnt > 0){
+            LOG.error("VMWARE respondWithShortCircuitResponse - Releasing httpRequest: {}, refcnt: {}", httpRequest.hashCode(),
+                    refCnt);
+            ReferenceCountUtil.release(httpRequest, refCnt);
+        }*/
+        
         HttpResponse filteredResponse = (HttpResponse) currentFilters.proxyToClientResponse(httpResponse);
         if (filteredResponse == null) {
             disconnect();

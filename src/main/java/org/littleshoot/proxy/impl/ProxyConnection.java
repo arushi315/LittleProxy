@@ -140,7 +140,14 @@ abstract class ProxyConnection<I extends HttpObject> extends
                 // response from a filter. The client may have sent some chunked HttpContent associated with the request
                 // after the short-circuit response was sent. We can safely drop them.
                 LOG.debug("Dropping message because HTTP object was not an HttpMessage. HTTP object may be orphaned content from a short-circuited response. Message: {}", httpObject);
-                ReferenceCountUtil.release(httpObject);
+                LOG.debug("VMWARE readHTTP - AWAITING_INITIAL httpObject:{}. refCnt:{}", 
+                        httpObject.hashCode(), ReferenceCountUtil.refCnt(httpObject));
+                
+                //                try {
+//                    ReferenceCountUtil.release(httpObject, ReferenceCountUtil.refCnt(httpObject));
+//                }catch (Exception ex){
+//                    LOG.error("VMWARE - UNABLE TO RELEASE: AWAITING_INITIAL", ex.getMessage());
+//                }
             }
             break;
         case AWAITING_CHUNK:
@@ -159,7 +166,6 @@ abstract class ProxyConnection<I extends HttpObject> extends
                 // can happen if the connected host already sent us some chunks
                 // (e.g. from a POST) after an initial request that turned out
                 // to require authentication.
-                ReferenceCountUtil.release(httpObject);
             }
             break;
         case CONNECTING:
@@ -179,7 +185,13 @@ abstract class ProxyConnection<I extends HttpObject> extends
         case DISCONNECT_REQUESTED:
         case DISCONNECTED:
             LOG.info("Ignoring message since the connection is closed or about to close");
-            ReferenceCountUtil.release(httpObject);
+            LOG.debug("VMWARE readHTTP - DISCONNECTED httpObject:{}. refCnt:{}",
+                    httpObject.hashCode(), ReferenceCountUtil.refCnt(httpObject));
+//            try {
+//                ReferenceCountUtil.release(httpObject, ReferenceCountUtil.refCnt(httpObject));
+//            }catch (Exception ex){
+//                LOG.error("VMWARE - UNABLE TO RELEASE: DISCONNECTED", ex.getMessage());
+//            }
             break;
         }
     }
@@ -222,12 +234,19 @@ abstract class ProxyConnection<I extends HttpObject> extends
         if (msg instanceof ReferenceCounted) {
             LOG.debug("Retaining reference counted message");
             ((ReferenceCounted) msg).retain();
+            LOG.debug("VMWARE ProxyConnection write - Retained msg:{}. refcnt: {}", 
+                    msg.hashCode(), ReferenceCountUtil.refCnt(msg));
         }
-
         doWrite(msg);
     }
 
     void doWrite(Object msg) {
+//          if (msg instanceof ReferenceCounted) {
+//            LOG.debug("Retaining reference counted message");
+//            ((ReferenceCounted) msg).retain();
+//            LOG.error("VMWARE ProxyConnection doWrite - Retaining msg:{}. refcnt: {}", msg.hashCode(), ReferenceCountUtil.refCnt(msg));
+//        }
+          
         LOG.debug("Writing: {}", msg);
 
         try {
@@ -252,7 +271,7 @@ abstract class ProxyConnection<I extends HttpObject> extends
             LOG.debug("Writing an empty buffer to signal the end of our chunked transfer");
             writeToChannel(Unpooled.EMPTY_BUFFER);
         } else {
-            writeToChannel(httpObject);
+            writeToChannel(httpObject); 
         }
     }
 
@@ -266,7 +285,20 @@ abstract class ProxyConnection<I extends HttpObject> extends
     }
 
     protected ChannelFuture writeToChannel(final Object msg) {
-        return channel.writeAndFlush(msg);
+        return channel.writeAndFlush(msg).addListener(future -> {
+//            if(!future.isSuccess()){
+                final int refCnt = ReferenceCountUtil.refCnt(msg);
+                if(refCnt > 0){
+                    LOG.debug("VMWARE writeToChannel ProxyConnection - msg:{}. refCnt: {}", 
+                            msg.hashCode(), refCnt);
+//                    try {
+//                        ReferenceCountUtil.release(msg, refCnt);
+//                    }catch (Exception ex){
+//                        LOG.error("VMWARE - UNABLE TO RELEASE: writeToChannel", ex.getMessage());
+//                    }
+//                }
+            }
+        });
     }
 
     /***************************************************************************
