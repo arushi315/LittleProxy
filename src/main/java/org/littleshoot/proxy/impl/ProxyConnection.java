@@ -230,33 +230,34 @@ abstract class ProxyConnection<I extends HttpObject> extends
      * 
      * @param msg
      */
-    void write(Object msg) {
+    void write(Object msg, int chunkCount) {
         if (msg instanceof ReferenceCounted) {
-            LOG.debug("Retaining reference counted message");
+            LOG.debug("Retaining reference counted message. chunkCount:{}, msg:{}, refCnt:{}", 
+                    chunkCount, msg.hashCode(), ReferenceCountUtil.refCnt(msg));
             ((ReferenceCounted) msg).retain();
-            LOG.debug("VMWARE ProxyConnection write - Retained msg:{}. refcnt: {}", 
-                    msg.hashCode(), ReferenceCountUtil.refCnt(msg));
+            LOG.debug("VMWARE ProxyConnection write - Retained. chunkCount:{}, msg:{}, refcnt: {}", 
+                    chunkCount, msg.hashCode(), ReferenceCountUtil.refCnt(msg));
         }
-        doWrite(msg);
+        doWrite(msg, chunkCount);
     }
 
-    void doWrite(Object msg) {
+    void doWrite(Object msg, int chunkCount) {
 //          if (msg instanceof ReferenceCounted) {
 //            LOG.debug("Retaining reference counted message");
 //            ((ReferenceCounted) msg).retain();
 //            LOG.error("VMWARE ProxyConnection doWrite - Retaining msg:{}. refcnt: {}", msg.hashCode(), ReferenceCountUtil.refCnt(msg));
 //        }
           
-        LOG.debug("Writing: {}", msg);
+        LOG.debug("Writing doWrite -  chunkCount:{} msg:{}, refCnt:{}", chunkCount, msg.hashCode(), ReferenceCountUtil.refCnt(msg));
 
         try {
             if (msg instanceof HttpObject) {
-                writeHttp((HttpObject) msg);
+                writeHttp((HttpObject) msg, chunkCount);
             } else {
                 writeRaw((ByteBuf) msg);
             }
         } finally {
-            LOG.debug("Wrote: {}", msg);
+            LOG.debug("Wrote doWrite - chunkCount{}. msg:{}, refCnt:{}", chunkCount, msg.hashCode(), ReferenceCountUtil.refCnt(msg));
         }
     }
 
@@ -265,13 +266,15 @@ abstract class ProxyConnection<I extends HttpObject> extends
      * 
      * @param httpObject
      */
-    protected void writeHttp(HttpObject httpObject) {
+    protected void writeHttp(HttpObject httpObject, int chunkCount) {
         if (ProxyUtils.isLastChunk(httpObject)) {
-            channel.write(httpObject);
+            // TODO: Made this change
+            channel.writeAndFlush(httpObject);
             LOG.debug("Writing an empty buffer to signal the end of our chunked transfer");
-            writeToChannel(Unpooled.EMPTY_BUFFER);
+            writeToChannel(Unpooled.EMPTY_BUFFER, chunkCount);
         } else {
-            writeToChannel(httpObject); 
+            LOG.debug("Writing - writeHttp ProxyConnection. chunkCount:{}", chunkCount);
+            writeToChannel(httpObject, chunkCount); 
         }
     }
 
@@ -281,23 +284,14 @@ abstract class ProxyConnection<I extends HttpObject> extends
      * @param buf
      */
     protected void writeRaw(ByteBuf buf) {
-        writeToChannel(buf);
+        writeToChannel(buf, -2);
     }
 
-    protected ChannelFuture writeToChannel(final Object msg) {
+    protected ChannelFuture writeToChannel(final Object msg, int chunkCount) {
         return channel.writeAndFlush(msg).addListener(future -> {
-//            if(!future.isSuccess()){
                 final int refCnt = ReferenceCountUtil.refCnt(msg);
-                if(refCnt > 0){
-                    LOG.debug("VMWARE writeToChannel ProxyConnection - msg:{}. refCnt: {}", 
-                            msg.hashCode(), refCnt);
-//                    try {
-//                        ReferenceCountUtil.release(msg, refCnt);
-//                    }catch (Exception ex){
-//                        LOG.error("VMWARE - UNABLE TO RELEASE: writeToChannel", ex.getMessage());
-//                    }
-//                }
-            }
+                LOG.debug("VMWARE writeToChannel ProxyConnection - chunkCount:{}, msg:{}. refCnt: {}", 
+                            chunkCount, msg.hashCode(), refCnt);
         });
     }
 
@@ -498,7 +492,7 @@ abstract class ProxyConnection<I extends HttpObject> extends
             return null;
         } else {
             final Promise<Void> promise = channel.newPromise();
-            writeToChannel(Unpooled.EMPTY_BUFFER).addListener(
+            writeToChannel(Unpooled.EMPTY_BUFFER, -2).addListener(
                     new GenericFutureListener<Future<? super Void>>() {
                         @Override
                         public void operationComplete(

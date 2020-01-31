@@ -145,6 +145,8 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
 
     private final GlobalTrafficShapingHandler globalTrafficShapingHandler;
 
+    private final AtomicInteger chunkCount = new AtomicInteger(0);
+    
     ClientToProxyConnection(
             final DefaultHttpProxyServer proxyServer,
             SslEngineSource sslEngineSource,
@@ -334,7 +336,7 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
             }
         }
 
-        LOG.debug("Writing request to ProxyToServerConnection");
+        LOG.debug("Writing request to ProxyToServerConnection. HttpRequest: {}, refCnt:{}", httpRequest.hashCode(), ReferenceCountUtil.refCnt(httpRequest));
         currentServerConnection.write(httpRequest, currentFilters);
 
         // Figure out our next state
@@ -484,13 +486,14 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
         currentFilters.clientToProxyRequest(chunk);
         currentFilters.proxyToServerRequest(chunk);
 
-        LOG.debug("VMWARE readHTTPChunk - Chunk:{}. refcnt: {}", chunk.hashCode(), ReferenceCountUtil.refCnt(chunk));
-        currentServerConnection.write(chunk);
+        LOG.debug("VMWARE readHTTPChunk ClientToProxy - Chunk:{}. refcnt: {}", 
+                chunk.hashCode(), ReferenceCountUtil.refCnt(chunk));
+        currentServerConnection.write(chunk, chunkCount.incrementAndGet());
     }
 
     @Override
     protected void readRaw(ByteBuf buf) {
-        currentServerConnection.write(buf);
+        currentServerConnection.write(buf, -2);
     }
 
     /***************************************************************************
@@ -515,7 +518,7 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
      */
     void respond(ProxyToServerConnection serverConnection, HttpFilters filters,
             HttpRequest currentHttpRequest, HttpResponse currentHttpResponse,
-            HttpObject httpObject) {
+            HttpObject httpObject, int chunkCount) {
 
         httpObject = filters.serverToProxyResponse(httpObject);
         if (httpObject == null) {
@@ -557,8 +560,15 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
             return;
         }
 
-        write(httpObject);
-
+        try {
+            LOG.debug("VMWARE responding to client. chunkCount:{}, httpObject:{}, refCnt:{}", chunkCount, httpObject.hashCode(),
+                    ReferenceCountUtil.refCnt(httpObject));
+            write(httpObject, chunkCount);
+        }finally {
+            LOG.debug("VMWARE AFTER responding to client. chunkCount:{}, httpObject:{}, refCnt:{}", chunkCount, httpObject.hashCode(),
+                    ReferenceCountUtil.refCnt(httpObject));
+        }
+        
         if (ProxyUtils.isLastChunk(httpObject)) {
             writeEmptyBuffer();
         }
@@ -587,7 +597,7 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
                     CONNECTION_ESTABLISHED);
             response.headers().set(HttpHeaders.Names.CONNECTION, HttpHeaders.Values.KEEP_ALIVE);
             ProxyUtils.addVia(response, proxyServer.getProxyAlias());
-            return writeToChannel(response);
+            return writeToChannel(response, -3);
         };
     };
 
@@ -1101,17 +1111,17 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
         RateLimiter rateLimiter = proxyServer.getRateLimiter();
 
         if(rateLimiter.isAuthenticationOverLimit(request)) {
-            write(rateLimiter.limitReachedResponse(request));
+            write(rateLimiter.limitReachedResponse(request), -4);
             return true;
         }
 
         if (!authenticator.authenticate(request)) {
             if(rateLimiter.isAuthenticationFailureOverLimit(request)) {
-                write(rateLimiter.limitReachedResponse(request));
+                write(rateLimiter.limitReachedResponse(request), -4);
                 return true;
             }
 
-            write(authenticator.authenticationFailureResponse(request));
+            write(authenticator.authenticationFailureResponse(request), -4);
             return true;
         }
 
@@ -1386,7 +1396,7 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
         // restore the keep alive status, if it was overwritten when modifying headers for proxying
         HttpHeaders.setKeepAlive(httpResponse, isKeepAlive);
 
-        write(httpResponse);
+        write(httpResponse, -5);
 
         if (ProxyUtils.isLastChunk(httpResponse)) {
             writeEmptyBuffer();
@@ -1435,7 +1445,7 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
      * need to when responses are fully written back to clients.
      */
     private void writeEmptyBuffer() {
-        write(Unpooled.EMPTY_BUFFER);
+        write(Unpooled.EMPTY_BUFFER, -2);
     }
 
     public boolean isMitming() {
