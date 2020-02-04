@@ -242,12 +242,6 @@ abstract class ProxyConnection<I extends HttpObject> extends
     }
 
     void doWrite(Object msg, int chunkCount) {
-//          if (msg instanceof ReferenceCounted) {
-//            LOG.debug("Retaining reference counted message");
-//            ((ReferenceCounted) msg).retain();
-//            LOG.error("VMWARE ProxyConnection doWrite - Retaining msg:{}. refcnt: {}", msg.hashCode(), ReferenceCountUtil.refCnt(msg));
-//        }
-          
         LOG.debug("Writing doWrite -  chunkCount:{} msg:{}, refCnt:{}", chunkCount, msg.hashCode(), ReferenceCountUtil.refCnt(msg));
 
         try {
@@ -716,7 +710,12 @@ abstract class ProxyConnection<I extends HttpObject> extends
                     bytesRead(((ByteBuf) msg).readableBytes());
                 }
             } catch (Throwable t) {
-                LOG.warn("Unable to record bytesRead", t);
+                final int refCnt = ReferenceCountUtil.refCnt(msg);
+                LOG.error("VMWARE BytesReadMonitor - msg:{}, refCnt:{}, exception:{}", 
+                        msg.hashCode(), refCnt, t.getMessage());
+                if(refCnt > 0){
+                    ReferenceCountUtil.safeRelease(msg, refCnt);
+                }
             } finally {
                 super.channelRead(ctx, msg);
             }
@@ -739,7 +738,12 @@ abstract class ProxyConnection<I extends HttpObject> extends
                     requestRead((HttpRequest) msg);
                 }
             } catch (Throwable t) {
-                LOG.warn("Unable to record bytesRead", t);
+                final int refCnt = ReferenceCountUtil.refCnt(msg);
+                LOG.error("VMWARE RequestReadMonitor - msg:{}, refCnt:{}, exception:{}",
+                        msg.hashCode(), refCnt, t.getMessage());
+                if(refCnt > 0){
+                    ReferenceCountUtil.safeRelease(msg, refCnt);
+                }
             } finally {
                 super.channelRead(ctx, msg);
             }
@@ -762,7 +766,12 @@ abstract class ProxyConnection<I extends HttpObject> extends
                     responseRead((HttpResponse) msg);
                 }
             } catch (Throwable t) {
-                LOG.warn("Unable to record bytesRead", t);
+                final int refCnt = ReferenceCountUtil.refCnt(msg);
+                LOG.error("VMWARE ResponseReadMonitor - msg:{}, refCnt:{}, exception:{}",
+                        msg.hashCode(), refCnt, t.getMessage());
+                if(refCnt > 0){
+                    ReferenceCountUtil.safeRelease(msg, refCnt);
+                }
             } finally {
                 super.channelRead(ctx, msg);
             }
@@ -785,7 +794,12 @@ abstract class ProxyConnection<I extends HttpObject> extends
             try {
                 proxyServer.getRequestTracer().start(clientToProxyConnection.channel);
             } catch (Throwable t) {
-                LOG.warn("Unable to start tracing request", t);
+                final int refCnt = ReferenceCountUtil.refCnt(msg);
+                LOG.error("VMWARE RequestTracerHandler channelRead- msg:{}, refCnt:{}, exception:{}",
+                        msg.hashCode(), refCnt, t.getMessage());
+                if(refCnt > 0){
+                    ReferenceCountUtil.safeRelease(msg, refCnt);
+                }
             } finally {
                 super.channelRead(ctx, msg);
             }
@@ -800,7 +814,13 @@ abstract class ProxyConnection<I extends HttpObject> extends
                 try {
                     proxyServer.getRequestTracer().finish(clientToProxyConnection.channel);
                 } catch (Throwable t) {
-                    LOG.warn("Unable to finish request tracing", t);
+                    LOG.error("Unable to finish request tracing", t);
+                    final int refCnt = ReferenceCountUtil.refCnt(msg);
+                    LOG.error("VMWARE RequestTracerHandler write - msg:{}, refCnt:{}, exception:{}",
+                            msg.hashCode(), refCnt, t.getMessage());
+                    if(refCnt > 0){
+                        ReferenceCountUtil.safeRelease(msg, refCnt);
+                    }
                 }
             }
         }
@@ -877,7 +897,12 @@ abstract class ProxyConnection<I extends HttpObject> extends
                     bytesWritten(((ByteBuf) msg).readableBytes());
                 }
             } catch (Throwable t) {
-                LOG.warn("Unable to record bytesRead", t);
+                final int refCnt = ReferenceCountUtil.refCnt(msg);
+                LOG.error("VMWARE BytesWrittenMonitor - msg:{}, refCnt:{}, exception:{}",
+                        msg.hashCode(), refCnt, t.getMessage());
+                if(refCnt > 0){
+                    ReferenceCountUtil.safeRelease(msg, refCnt);
+                }
             } finally {
                 super.write(ctx, msg, promise);
             }
@@ -946,7 +971,12 @@ abstract class ProxyConnection<I extends HttpObject> extends
                     responseWritten(((HttpResponse) msg));
                 }
             } catch (Throwable t) {
-                LOG.warn("Error while invoking responseWritten callback", t);
+                final int refCnt = ReferenceCountUtil.refCnt(msg);
+                LOG.error("VMWARE ResponseWrittenMonitor - msg:{}, refCnt:{}, exception:{}",
+                        msg.hashCode(), refCnt, t.getMessage());
+                if(refCnt > 0){
+                    ReferenceCountUtil.safeRelease(msg, refCnt);
+                }
             } finally {
                 super.write(ctx, msg, promise);
             }

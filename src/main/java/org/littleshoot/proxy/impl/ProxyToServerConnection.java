@@ -1274,7 +1274,12 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
                     tracker.requestSentToServer(flowContext, httpRequest);
                 }
             } catch (Throwable t) {
-                LOG.warn("Error while invoking ActivityTracker on request", t);
+                final int refCnt = ReferenceCountUtil.refCnt(httpRequest);
+                LOG.error("VMWARE requestWrittenMonitor - httpRequest:{}, refCnt:{}, exception:{}",
+                        httpRequest.hashCode(), refCnt, t.getMessage());
+                if(refCnt > 0){
+                    ReferenceCountUtil.safeRelease(httpRequest, refCnt);
+                }
             }
 
             currentFilters.proxyToServerRequestSending();
