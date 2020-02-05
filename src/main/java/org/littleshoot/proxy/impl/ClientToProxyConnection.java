@@ -899,16 +899,16 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
             for (final ActivityTracker activityTracker : proxyServer.getActivityTrackers()) {
                 LOG.debug("Activity Tracker: {}", activityTracker.getClass());
             }
-            pipeline.addLast(globalStateWrapperEvenLoop, "bytesReadMonitor", bytesReadMonitor);
-            pipeline.addLast(globalStateWrapperEvenLoop, "bytesWrittenMonitor", bytesWrittenMonitor);
+            pipeline.addLast(globalStateWrapperEvenLoop, "clientToProxyBytesReadMonitor", bytesReadMonitor);
+            pipeline.addLast(globalStateWrapperEvenLoop, "clientToProxyBytesWrittenMonitor", bytesWrittenMonitor);
         }
 
-        pipeline.addLast("proxyProtocolReader", new HttpProxyProtocolRequestDecoder());
+        pipeline.addLast("clientToProxyProxyProtocolReader", new HttpProxyProtocolRequestDecoder());
 
-        pipeline.addLast("encoder", new HttpResponseEncoder());
+        pipeline.addLast("clientToProxyEncoder", new HttpResponseEncoder());
         // We want to allow longer request lines, headers, and chunks
         // respectively.
-        pipeline.addLast("decoder", new HttpRequestDecoder(
+        pipeline.addLast("clientToProxyDecoder", new HttpRequestDecoder(
                 proxyServer.getMaxInitialLineLength(),
                 proxyServer.getMaxHeaderSize(),
                 proxyServer.getMaxChunkSize()));
@@ -921,12 +921,12 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
         }
 
         if(!proxyServer.getActivityTrackers().isEmpty()){
-            pipeline.addLast(globalStateWrapperEvenLoop, "requestReadMonitor", requestReadMonitor);
-            pipeline.addLast(globalStateWrapperEvenLoop, "responseWrittenMonitor", responseWrittenMonitor);
+            pipeline.addLast(globalStateWrapperEvenLoop, "clientToProxyRequestReadMonitor", requestReadMonitor);
+            pipeline.addLast(globalStateWrapperEvenLoop, "clientToProxyResponseWrittenMonitor", responseWrittenMonitor);
         }
 
         pipeline.addLast(
-                "idle",
+                "clientToProxyIdle",
                 new IdleStateHandler(0, 0, proxyServer
                         .getIdleConnectionTimeout()));
 
@@ -934,8 +934,8 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
             pipeline.addLast("outboundGlobalStateHandler", new OutboundGlobalStateHandler(this));
         }
 
-        pipeline.addLast(globalStateWrapperEvenLoop,  "router", this);
-        pipeline.addLast(globalStateWrapperEvenLoop,  "httpInitialHandler", new HttpInitialHandler<>(this));
+        pipeline.addLast(globalStateWrapperEvenLoop,  "clientToProxyRouter", this);
+        pipeline.addLast(globalStateWrapperEvenLoop,  "clientToProxyHttpInitialHandler", new HttpInitialHandler<>(this));
         pipeline.addLast(globalStateWrapperEvenLoop,  "clientToProxyMessageProcessor", new ClientToProxyMessageProcessor());
         pipeline.addLast(globalStateWrapperEvenLoop,  "upstreamConnectionHandler", new UpstreamConnectionHandler(this));
 

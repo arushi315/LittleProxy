@@ -1106,12 +1106,12 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
             for (final ActivityTracker activityTracker : proxyServer.getActivityTrackers()) {
                 LOG.debug("Activity Tracker: {}", activityTracker.getClass());
             }
-            pipeline.addLast(globalStateWrapperEvenLoop, "bytesReadMonitor", bytesReadMonitor);
-            pipeline.addLast(globalStateWrapperEvenLoop, "bytesWrittenMonitor", bytesWrittenMonitor);
+            pipeline.addLast(globalStateWrapperEvenLoop, "proxyToServerBytesReadMonitor", bytesReadMonitor);
+            pipeline.addLast(globalStateWrapperEvenLoop, "proxyToServerBytesWrittenMonitor", bytesWrittenMonitor);
         }
 
-        pipeline.addLast("encoder", new HttpRequestEncoder());
-        pipeline.addLast("decoder", new HeadAwareHttpResponseDecoder(
+        pipeline.addLast("proxyToServerEncoder", new HttpRequestEncoder());
+        pipeline.addLast("proxyToServerDecoder", new HeadAwareHttpResponseDecoder(
         		proxyServer.getMaxInitialLineLength(),
                 proxyServer.getMaxHeaderSize(),
                 proxyServer.getMaxChunkSize()));
@@ -1123,13 +1123,13 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
             aggregateContentForFiltering(pipeline, numberOfBytesToBuffer);
         }
         if(!proxyServer.getActivityTrackers().isEmpty()) {
-            pipeline.addLast(globalStateWrapperEvenLoop, "requestWrittenMonitor", requestWrittenMonitor);
-            pipeline.addLast(globalStateWrapperEvenLoop, "responseReadMonitor", responseReadMonitor);
+            pipeline.addLast(globalStateWrapperEvenLoop, "proxyToServerRequestWrittenMonitor", requestWrittenMonitor);
+            pipeline.addLast(globalStateWrapperEvenLoop, "proxyToServerResponseReadMonitor", responseReadMonitor);
         }
 
         // Set idle timeout
         pipeline.addLast(
-                "idle",
+                "proxyToServerIdle",
                 new IdleStateHandler(0, 0, proxyServer
                         .getIdleConnectionTimeout()));
 
@@ -1137,9 +1137,9 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
             pipeline.addLast("outboundGlobalStateHandler", new OutboundGlobalStateHandler(clientConnection));
         }
 
-        pipeline.addLast(globalStateWrapperEvenLoop,  "router", this);
-        pipeline.addLast(globalStateWrapperEvenLoop,  "httpInitialHandler", new HttpInitialHandler<>(this));
-        pipeline.addLast(globalStateWrapperEvenLoop,  "respondToClientHandler", new RespondToClientHandler());
+        pipeline.addLast(globalStateWrapperEvenLoop,  "proxyToServerRouter", this);
+        pipeline.addLast(globalStateWrapperEvenLoop,  "proxyToServerHttpInitialHandler", new HttpInitialHandler<>(this));
+        pipeline.addLast(globalStateWrapperEvenLoop,  "proxyToServerRespondToClientHandler", new RespondToClientHandler());
     }
 
     /**
@@ -1275,11 +1275,11 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
                 }
             } catch (Throwable t) {
                 final int refCnt = ReferenceCountUtil.refCnt(httpRequest);
-                LOG.error("VMWARE requestWrittenMonitor - httpRequest:{}, refCnt:{}, exception:{}",
+                LOG.error("VMWARE monitor requestWrittenMonitor - httpRequest:{}, refCnt:{}, exception:{}",
                         httpRequest.hashCode(), refCnt, t.getMessage());
-                if(refCnt > 0){
+               /* if(refCnt > 0){
                     ReferenceCountUtil.safeRelease(httpRequest, refCnt);
-                }
+                }*/
             }
 
             currentFilters.proxyToServerRequestSending();
