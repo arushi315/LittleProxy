@@ -5,7 +5,9 @@ import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
+import io.netty.channel.ChannelOutboundHandlerAdapter;
 import io.netty.channel.ChannelPipeline;
+import io.netty.channel.ChannelPromise;
 import io.netty.handler.codec.http.DefaultHttpRequest;
 import io.netty.handler.codec.http.FullHttpRequest;
 import io.netty.handler.codec.http.FullHttpResponse;
@@ -23,6 +25,7 @@ import io.netty.handler.codec.http.HttpVersion;
 import io.netty.handler.timeout.IdleStateHandler;
 import io.netty.handler.traffic.GlobalTrafficShapingHandler;
 import io.netty.util.ReferenceCountUtil;
+import io.netty.util.ReferenceCounted;
 import io.netty.util.concurrent.EventExecutorGroup;
 import io.netty.util.concurrent.Future;
 import io.netty.util.concurrent.GenericFutureListener;
@@ -189,7 +192,7 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
     @Override
     protected ConnectionState readHTTPInitial(ChannelHandlerContext ctx, Object httpRequestObj) {
         HttpRequest httpRequest = (HttpRequest) httpRequestObj;
-        LOG.debug("Received raw refCnt: {}, request: {}", ReferenceCountUtil.refCnt(httpRequest), httpRequest);
+        LOG.debug("Received raw request refCnt: {}, request: {}", ReferenceCountUtil.refCnt(httpRequest), httpRequest);
 
         // if we cannot parse the request, immediately return a 400 and close the connection, since we do not know what state
         // the client thinks the connection is in
@@ -493,7 +496,8 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
 
     @Override
     protected void readRaw(ByteBuf buf) {
-        currentServerConnection.write(buf, -2);
+        LOG.debug("VMWARE readRaw - writing to server - buf:{}, refCnt:{}", buf.hashCode(), ReferenceCountUtil.refCnt(buf));
+        currentServerConnection.write(buf, chunkCount.incrementAndGet());
     }
 
     /***************************************************************************
@@ -522,7 +526,7 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
 
         httpObject = filters.serverToProxyResponse(httpObject);
         if (httpObject == null) {
-            forceDisconnect(serverConnection);
+            forceDisconnect(serverConnection, httpObject);
             return;
         }
 
@@ -556,7 +560,7 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
 
         httpObject = filters.proxyToClientResponse(httpObject);
         if (httpObject == null) {
-            forceDisconnect(serverConnection);
+            forceDisconnect(serverConnection, httpObject);
             return;
         }
 
@@ -904,11 +908,13 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
         }
 
         pipeline.addLast("clientToProxyProxyProtocolReader", new HttpProxyProtocolRequestDecoder());
+        
+        pipeline.addLast("ClientToProxyCheckReferenceHandler", new CheckReferenceHandler());
 
-        pipeline.addLast("clientToProxyEncoder", new HttpResponseEncoder());
+        pipeline.addLast("encoder", new CustomHttpResponseEncoder());
         // We want to allow longer request lines, headers, and chunks
         // respectively.
-        pipeline.addLast("clientToProxyDecoder", new HttpRequestDecoder(
+        pipeline.addLast("decoder", new HttpRequestDecoder(
                 proxyServer.getMaxInitialLineLength(),
                 proxyServer.getMaxHeaderSize(),
                 proxyServer.getMaxChunkSize()));
@@ -921,8 +927,8 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
         }
 
         if(!proxyServer.getActivityTrackers().isEmpty()){
-            pipeline.addLast(globalStateWrapperEvenLoop, "clientToProxyRequestReadMonitor", requestReadMonitor);
-            pipeline.addLast(globalStateWrapperEvenLoop, "clientToProxyResponseWrittenMonitor", responseWrittenMonitor);
+            pipeline.addLast(globalStateWrapperEvenLoop, "requestReadMonitor", requestReadMonitor);
+            pipeline.addLast(globalStateWrapperEvenLoop, "responseWrittenMonitor", responseWrittenMonitor);
         }
 
         pipeline.addLast(
@@ -941,6 +947,33 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
 
     }
 
+    private class CheckReferenceHandler extends ChannelOutboundHandlerAdapter{
+        @Override
+        public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) throws Exception{
+//                LOG.warn("VMWARE CheckReferenceHandler - msg:{}, refCnt:{}",
+//                        msg.hashCode(), refCnt);
+                /*if(refCnt > 1){
+                    ReferenceCountUtil.release(msg);
+                    LOG.warn("VMWARE CheckReferenceHandler - Released msg buffer msg:{}, refCnt:{}",
+                            msg.hashCode(), ReferenceCountUtil.refCnt(msg));
+                }*/
+                
+            super.write(ctx, msg,promise);
+            int refCnt = ReferenceCountUtil.refCnt(msg);
+            LOG.warn("VMWARE CheckReferenceHandler - msg:{}, refCnt:{}",
+                    msg.hashCode(), refCnt);
+        }
+    }
+    
+    private class CustomHttpResponseEncoder extends HttpResponseEncoder{
+        @Override
+        public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) throws Exception{
+            super.write(ctx, msg,promise);
+            final int refCnt = ReferenceCountUtil.refCnt(msg);
+            LOG.warn("VMWARE CustomHttpResponseEncoder - msg:{}, refCnt:{}",
+                    msg.hashCode(), refCnt);
+        }
+    }
     /**
      * This method takes care of closing client to proxy and/or proxy to server
      * connections after finishing a write.
@@ -965,8 +998,12 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
         }
     }
 
-    private void forceDisconnect(ProxyToServerConnection serverConnection) {
+    private void forceDisconnect(ProxyToServerConnection serverConnection, HttpObject httpObject) {
         LOG.debug("Forcing disconnect");
+        if(httpObject instanceof ReferenceCounted){
+            LOG.warn("Forcing disconnect. Releasing httpObject:{}, refCnt:{}", httpObject.hashCode(), ReferenceCountUtil.refCnt(httpObject));
+            ReferenceCountUtil.release(httpObject, ReferenceCountUtil.refCnt(httpObject));
+        }
         serverConnection.disconnect();
         disconnect();
     }

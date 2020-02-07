@@ -17,6 +17,7 @@ import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelOption;
 import io.netty.channel.ChannelPipeline;
+import io.netty.channel.ChannelPromise;
 import io.netty.channel.socket.nio.NioSocketChannel;
 import io.netty.channel.udt.nio.NioUdtProvider;
 import io.netty.handler.codec.http.*;
@@ -318,7 +319,8 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
 
     @Override
     protected void readRaw(ByteBuf buf) {
-        clientConnection.write(buf, -2);
+        LOG.debug("VMWARE readRaw - writing to client - buf:{}, refCnt:{}", buf.hashCode(), ReferenceCountUtil.refCnt(buf));
+        clientConnection.write(buf, chunkCount.incrementAndGet());
     }
 
     /**
@@ -660,6 +662,7 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
      * handling CONNECTs.
      */
     private void initializeConnectionFlow() {
+        LOG.debug("VMWARE - initializeConnectionFlow");
         this.connectionFlow = new ConnectionFlow(clientConnection, this,
                 connectLock)
                 .then(ConnectChannel);
@@ -686,6 +689,7 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
             boolean isMitmEnabled = mitmManager != null;
 
             if (isMitmEnabled) {
+                LOG.debug("VMWARE initializeConnectionFlow - MITM enabled.");
                 // When MITM is enabled and when chained proxy is set up, remoteAddress
                 // will be the chained proxy's address. So we use serverHostAndPort
                 // which is the end server's address.
@@ -1110,8 +1114,8 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
             pipeline.addLast(globalStateWrapperEvenLoop, "proxyToServerBytesWrittenMonitor", bytesWrittenMonitor);
         }
 
-        pipeline.addLast("proxyToServerEncoder", new HttpRequestEncoder());
-        pipeline.addLast("proxyToServerDecoder", new HeadAwareHttpResponseDecoder(
+        pipeline.addLast("encoder", new CustomHttpRequestEncoder());
+        pipeline.addLast("decoder", new HeadAwareHttpResponseDecoder(
         		proxyServer.getMaxInitialLineLength(),
                 proxyServer.getMaxHeaderSize(),
                 proxyServer.getMaxChunkSize()));
@@ -1123,8 +1127,8 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
             aggregateContentForFiltering(pipeline, numberOfBytesToBuffer);
         }
         if(!proxyServer.getActivityTrackers().isEmpty()) {
-            pipeline.addLast(globalStateWrapperEvenLoop, "proxyToServerRequestWrittenMonitor", requestWrittenMonitor);
-            pipeline.addLast(globalStateWrapperEvenLoop, "proxyToServerResponseReadMonitor", responseReadMonitor);
+            pipeline.addLast(globalStateWrapperEvenLoop, "requestWrittenMonitor", requestWrittenMonitor);
+            pipeline.addLast(globalStateWrapperEvenLoop, "responseReadMonitor", responseReadMonitor);
         }
 
         // Set idle timeout
@@ -1140,6 +1144,16 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
         pipeline.addLast(globalStateWrapperEvenLoop,  "proxyToServerRouter", this);
         pipeline.addLast(globalStateWrapperEvenLoop,  "proxyToServerHttpInitialHandler", new HttpInitialHandler<>(this));
         pipeline.addLast(globalStateWrapperEvenLoop,  "proxyToServerRespondToClientHandler", new RespondToClientHandler());
+    }
+
+    private class CustomHttpRequestEncoder extends HttpRequestEncoder{
+        @Override
+        public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) throws Exception{
+            super.write(ctx, msg,promise);
+            final int refCnt = ReferenceCountUtil.refCnt(msg);
+            LOG.warn("VMWARE CustomHttpRequestEncoder - msg:{}, refCnt:{}",
+                    msg.hashCode(), refCnt);
+        }
     }
 
     /**

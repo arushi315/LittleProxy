@@ -110,7 +110,7 @@ abstract class ProxyConnection<I extends HttpObject> extends
      * @param msg
      */
     protected void read(Object msg) {
-        LOG.debug("Reading: {}", msg);
+        LOG.debug("Reading: {}, refCnt:{}", msg.hashCode(), ReferenceCountUtil.refCnt(msg));
 
         lastReadTime = System.currentTimeMillis();
 
@@ -247,7 +247,7 @@ abstract class ProxyConnection<I extends HttpObject> extends
             if (msg instanceof HttpObject) {
                 writeHttp((HttpObject) msg, chunkCount);
             } else {
-                writeRaw((ByteBuf) msg);
+                writeRaw((ByteBuf) msg, chunkCount);
             }
         } finally {
             LOG.debug("Wrote doWrite - chunkCount{}. msg:{}, refCnt:{}", chunkCount, msg.hashCode(), ReferenceCountUtil.refCnt(msg));
@@ -276,8 +276,10 @@ abstract class ProxyConnection<I extends HttpObject> extends
      * 
      * @param buf
      */
-    protected void writeRaw(ByteBuf buf) {
-        writeToChannel(buf, -2);
+    protected void writeRaw(ByteBuf buf, int chunkCount) {
+        LOG.debug("VMWARE writeRaw ProxyConnection - chunkCount:{}, msg:{}. refCnt: {}",
+                chunkCount, buf.hashCode(), ReferenceCountUtil.refCnt(buf));
+        writeToChannel(buf, chunkCount);
     }
 
     protected ChannelFuture writeToChannel(final Object msg, int chunkCount) {
@@ -341,6 +343,7 @@ abstract class ProxyConnection<I extends HttpObject> extends
 
         protected Future execute() {
             try {
+                LOG.debug("VMWARE StartTunneling - Removing handlers.");
                 ChannelPipeline pipeline = ctx.pipeline();
                 if (pipeline.get("encoder") != null) {
                     pipeline.remove("encoder");
@@ -398,9 +401,9 @@ abstract class ProxyConnection<I extends HttpObject> extends
         if (null != channel) {
             channel.config().setAutoRead(true);
         }
-        SslHandler handler = new SslHandler(sslEngine);
+        CustomSslHandler handler = new CustomSslHandler(sslEngine);
         if(pipeline.get("ssl") == null) {
-            pipeline.addFirst("ssl", handler);
+            pipeline.addFirst("customSsl", handler);
         } else {
             // The second SSL handler is added to handle the case
             // where the proxy (running as MITM) has to chain with
@@ -409,6 +412,27 @@ abstract class ProxyConnection<I extends HttpObject> extends
             pipeline.addAfter("ssl", "sslWithServer", handler);
         }
         return handler.handshakeFuture();
+    }
+    
+    private class CustomSslHandler extends SslHandler {
+
+        public CustomSslHandler(final SSLEngine engine) {
+            super(engine);
+        }
+
+        @Override
+        public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) throws Exception{
+                /*if(refCnt > 1){
+                    ReferenceCountUtil.release(msg);
+                    LOG.warn("VMWARE CheckReferenceHandler - Released msg buffer msg:{}, refCnt:{}",
+                            msg.hashCode(), ReferenceCountUtil.refCnt(msg));
+                }*/
+            super.write(ctx, msg,promise);
+            int refCnt = ReferenceCountUtil.refCnt(msg);
+            LOG.warn("VMWARE CustomSslHandler - msg:{}, refCnt:{}",
+                    msg.hashCode(), refCnt);
+        }
+        
     }
 
     /**
@@ -966,7 +990,10 @@ abstract class ProxyConnection<I extends HttpObject> extends
                 Object msg, ChannelPromise promise)
                 throws Exception {
             try {
+                LOG.warn("VMWARE ResponseWrittenMonitor - msg:{}, refCnt:{}",
+                        msg.hashCode(), ReferenceCountUtil.refCnt(msg));
                 if (msg instanceof HttpResponse) {
+                    LOG.warn("VMWARE ResponseWrittenMonitor - responseWritten called.");
                     responseWritten(((HttpResponse) msg));
                 }
             } catch (Throwable t) {
