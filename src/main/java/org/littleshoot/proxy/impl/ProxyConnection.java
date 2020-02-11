@@ -262,7 +262,16 @@ abstract class ProxyConnection<I extends HttpObject> extends
     protected void writeHttp(HttpObject httpObject, int chunkCount) {
         if (ProxyUtils.isLastChunk(httpObject)) {
             // TODO: Made this change
-            channel.writeAndFlush(httpObject);
+            channel.write(httpObject).addListener(future -> {
+                final int refCnt = ReferenceCountUtil.refCnt(httpObject);
+                LOG.warn("VMWARE writeHttp Lastchunk - httpObject:{}, refCnt:{}", httpObject.hashCode(),
+                        refCnt);
+                if(refCnt > 0){
+                    ReferenceCountUtil.release(httpObject, refCnt);
+                    LOG.error("VMWARE  writeHttp LastChunk - Released httpObject:{}, refCnt:{}", httpObject.hashCode(), 
+                            ReferenceCountUtil.refCnt(httpObject));
+                }
+            });
             LOG.debug("Writing an empty buffer to signal the end of our chunked transfer");
             writeToChannel(Unpooled.EMPTY_BUFFER, chunkCount);
         } else {
@@ -284,8 +293,8 @@ abstract class ProxyConnection<I extends HttpObject> extends
 
     protected ChannelFuture writeToChannel(final Object msg, int chunkCount) {
         return channel.writeAndFlush(msg).addListener(future -> {
-                final int refCnt = ReferenceCountUtil.refCnt(msg);
-                LOG.debug("VMWARE writeToChannel ProxyConnection - chunkCount:{}, msg:{}. refCnt: {}", 
+                int refCnt = ReferenceCountUtil.refCnt(msg);
+                LOG.warn("VMWARE writeToChannel ProxyConnection - chunkCount:{}, msg:{}. refCnt: {}", 
                             chunkCount, msg.hashCode(), refCnt);
         });
     }
