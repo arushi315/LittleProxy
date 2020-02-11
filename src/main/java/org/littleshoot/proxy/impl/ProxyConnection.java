@@ -6,6 +6,7 @@ import io.netty.channel.*;
 import io.netty.handler.codec.http.*;
 import io.netty.handler.ssl.SslHandler;
 import io.netty.handler.timeout.IdleStateEvent;
+import io.netty.util.ReferenceCountUtil;
 import io.netty.util.ReferenceCounted;
 import io.netty.util.concurrent.Future;
 import io.netty.util.concurrent.GenericFutureListener;
@@ -244,7 +245,13 @@ abstract class ProxyConnection<I extends HttpObject> extends
      */
     protected void writeHttp(HttpObject httpObject) {
         if (ProxyUtils.isLastChunk(httpObject)) {
-            channel.write(httpObject);
+            channel.write(httpObject).addListener(future -> {
+                final int refCnt = ReferenceCountUtil.refCnt(httpObject);
+                if(refCnt > 0){
+                    ReferenceCountUtil.release(httpObject, refCnt);
+                    LOG.debug("Wrote last chunk and released buffer.");
+                }
+            });
             LOG.debug("Writing an empty buffer to signal the end of our chunked transfer");
             writeToChannel(Unpooled.EMPTY_BUFFER);
         } else {
