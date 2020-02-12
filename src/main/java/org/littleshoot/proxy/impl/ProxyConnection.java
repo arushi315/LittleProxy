@@ -245,12 +245,8 @@ abstract class ProxyConnection<I extends HttpObject> extends
      */
     protected void writeHttp(HttpObject httpObject) {
         if (ProxyUtils.isLastChunk(httpObject)) {
-            channel.write(httpObject).addListener(future -> {
-                final int refCnt = ReferenceCountUtil.refCnt(httpObject);
-                if(refCnt > 0){
-                    ReferenceCountUtil.release(httpObject, refCnt);
-                    LOG.debug("Wrote last chunk and released buffer.");
-                }
+            channel.writeAndFlush(httpObject).addListener(future -> {
+                LOG.debug("Wrote last chunk.");
             });
             LOG.debug("Writing an empty buffer to signal the end of our chunked transfer");
             writeToChannel(Unpooled.EMPTY_BUFFER);
