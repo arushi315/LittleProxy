@@ -1001,8 +1001,8 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
     private void forceDisconnect(ProxyToServerConnection serverConnection, HttpObject httpObject) {
         LOG.debug("Forcing disconnect");
         if(httpObject instanceof ReferenceCounted){
-            LOG.warn("Forcing disconnect. Releasing httpObject:{}, refCnt:{}", httpObject.hashCode(), ReferenceCountUtil.refCnt(httpObject));
-            ReferenceCountUtil.release(httpObject, ReferenceCountUtil.refCnt(httpObject));
+            LOG.error("VMWARE Forcing disconnect - httpObject:{}, refCnt:{}", httpObject.hashCode(), ReferenceCountUtil.refCnt(httpObject));
+//            ReferenceCountUtil.release(httpObject, ReferenceCountUtil.refCnt(httpObject));
         }
         serverConnection.disconnect();
         disconnect();
@@ -1433,7 +1433,7 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
         // restore the keep alive status, if it was overwritten when modifying headers for proxying
         HttpHeaders.setKeepAlive(httpResponse, isKeepAlive);
 
-        write(httpResponse, -5);
+        doWrite(httpResponse, -5);
 
         if (ProxyUtils.isLastChunk(httpResponse)) {
             writeEmptyBuffer();
