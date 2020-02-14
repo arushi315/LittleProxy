@@ -7,8 +7,15 @@ import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.util.AttributeKey;
+import io.netty.util.ReferenceCountUtil;
 
 public class HttpProxyProtocolRequestDecoder extends ChannelInboundHandlerAdapter {
+  
+  ProxyConnectionLogger proxyConnectionLogger;
+  
+  HttpProxyProtocolRequestDecoder(ProxyConnectionLogger logger){
+    this.proxyConnectionLogger = logger;
+  }
 
   public static final AttributeKey<String> SOURCE_IP_ATTRIBUTE = AttributeKey.valueOf("sourceIp");
 
@@ -28,32 +35,43 @@ public class HttpProxyProtocolRequestDecoder extends ChannelInboundHandlerAdapte
 
   @Override
   public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
-    ByteBuf buf = ((ByteBuf) msg);
+    ByteBuf buf = null;
+    try{
+      buf = ((ByteBuf) msg);
 
-    String body = bufToString(buf);
+      String body = bufToString(buf);
 
-    Matcher tcp4Matcher = TCP4_PROXY_PROTOCOL_HEADER_PATTERN.matcher(body);
-    Matcher tcp6Matcher = TCP6_PROXY_PROTOCOL_HEADER_PATTERN.matcher(body);
+      Matcher tcp4Matcher = TCP4_PROXY_PROTOCOL_HEADER_PATTERN.matcher(body);
+      Matcher tcp6Matcher = TCP6_PROXY_PROTOCOL_HEADER_PATTERN.matcher(body);
 
-    String sourceIp;
+      String sourceIp;
 
-    if (tcp4Matcher.find()) {
-      sourceIp = tcp4Matcher.group(1);
-    } else if (tcp6Matcher.find()) {
-      sourceIp = tcp6Matcher.group(1);
-    } else {
-      ctx.fireChannelRead(msg);
-      return; // no proxy protocol header found, proceed
+      if (tcp4Matcher.find()) {
+        sourceIp = tcp4Matcher.group(1);
+      } else if (tcp6Matcher.find()) {
+        sourceIp = tcp6Matcher.group(1);
+      } else {
+        ctx.fireChannelRead(msg);
+        return; // no proxy protocol header found, proceed
+      }
+
+      ctx.channel().attr(SOURCE_IP_ATTRIBUTE).set(sourceIp);
+
+      int proxyProtocolHeaderIndex = body.indexOf("\r\n");
+      String stripped = body.substring(proxyProtocolHeaderIndex + 2); // +2 for \r\n
+
+      buf.clear().writeBytes(stripped.getBytes());
+      ctx.fireChannelRead(buf);
+    }catch (Exception ex){
+      final int cnt = ReferenceCountUtil.refCnt(buf);
+      proxyConnectionLogger.error("VMWARE HttpProxyProtocolRequestDecoder - buf:{}, refCnt:{}.",
+              buf.hashCode(), cnt, ex);
+      if(cnt > 0){
+        ReferenceCountUtil.release(buf, cnt);
+      }
+      throw ex;
     }
 
-    ctx.channel().attr(SOURCE_IP_ATTRIBUTE).set(sourceIp);
-
-    int proxyProtocolHeaderIndex = body.indexOf("\r\n");
-    String stripped = body.substring(proxyProtocolHeaderIndex + 2); // +2 for \r\n
-
-    buf.clear().writeBytes(stripped.getBytes());
-
-    ctx.fireChannelRead(buf);
   }
 
   private String bufToString(ByteBuf content) {

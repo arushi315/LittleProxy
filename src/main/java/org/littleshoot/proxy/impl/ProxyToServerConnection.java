@@ -293,11 +293,20 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
                               become(AWAITING_INITIAL);
                           }).run();
                       } catch (Exception e) {
+                          final int cnt = ReferenceCountUtil.refCnt(httpResponse);
+                          if(cnt > 0){
+                              ReferenceCountUtil.release(httpResponse, cnt);
+                              LOG.error("VMWARE channelRead RespondToClientHandler exception - Released httpResponse:{}. refcnt: {}",
+                                      httpResponse.hashCode(), ReferenceCountUtil.refCnt(httpResponse));
+                          }
                           exceptionCaught(ctx, e);
                       } finally {
-                          ReferenceCountUtil.release(httpResponse);
-                          LOG.error("VMWARE channelRead RespondToClientHandler - Released httpResponse:{}. refcnt: {}",
-                                  httpResponse.hashCode(), ReferenceCountUtil.refCnt(httpResponse));
+                          final int cnt = ReferenceCountUtil.refCnt(httpResponse);
+                          if(cnt > 0){ 
+                              ReferenceCountUtil.release(httpResponse);
+                              LOG.error("VMWARE channelRead RespondToClientHandler finally - Released httpResponse:{}. refcnt: {}",
+                                      httpResponse.hashCode(), ReferenceCountUtil.refCnt(httpResponse));
+                          }
                       }
                     });
             }
@@ -360,7 +369,25 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
                 return ProxyUtils.isHEAD(currentHttpRequest) || super.isContentAlwaysEmpty(httpMessage);
             }
         }
-    };
+
+        @Override
+        public void channelRead(final ChannelHandlerContext ctx, final Object msg) throws Exception {
+            try{
+                super.channelRead(ctx, msg);
+                final int refCnt = ReferenceCountUtil.refCnt(msg);
+                LOG.warn("VMWARE HeadAwareHttpResponseDecoder - msg:{}, refCnt:{}",
+                        msg.hashCode(), refCnt);
+            }catch (Exception ex){
+                final int cnt = ReferenceCountUtil.refCnt(msg);
+                LOG.error("VMWARE HeadAwareHttpResponseDecoder - msg:{}, refCnt:{}.",
+                        msg.hashCode(), cnt, ex);
+                if(cnt > 0){
+                    ReferenceCountUtil.release(msg, cnt);
+                }
+                throw ex;
+            }
+        }
+    }
 
     /***************************************************************************
      * Writing
@@ -634,6 +661,14 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
             
             clientConnection.respond(this, currentFilters, currentHttpRequest,
                     currentHttpResponse, httpObject, chunkCount);
+        }catch(Exception ex){
+            final int cnt = ReferenceCountUtil.refCnt(httpObject);
+            LOG.error("VMWARE ProxyToServer respondWith - httpObject:{}, refCnt:{}.",
+                    httpObject.hashCode(), cnt, ex);
+            if(cnt > 0){
+                ReferenceCountUtil.release(httpObject, cnt);
+            }
+            throw ex;
         }finally {
             LOG.debug("VMWARE AFTER respondWith to client. chunkCount:{}, httpObject:{}, refCnt:{}", chunkCount, httpObject.hashCode(),
                     ReferenceCountUtil.refCnt(httpObject));
@@ -1149,10 +1184,20 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
     private class CustomHttpRequestEncoder extends HttpRequestEncoder{
         @Override
         public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) throws Exception{
-            super.write(ctx, msg,promise);
-            final int refCnt = ReferenceCountUtil.refCnt(msg);
-            LOG.warn("VMWARE CustomHttpRequestEncoder - msg:{}, refCnt:{}",
+            try{
+                super.write(ctx, msg,promise);
+                final int refCnt = ReferenceCountUtil.refCnt(msg);
+                LOG.warn("VMWARE CustomHttpRequestEncoder - msg:{}, refCnt:{}",
                     msg.hashCode(), refCnt);
+            }catch (Exception ex){
+                final int cnt = ReferenceCountUtil.refCnt(msg);
+                LOG.error("VMWARE CustomHttpRequestEncoder - msg:{}, refCnt:{}.",
+                        msg.hashCode(), cnt, ex);
+                if(cnt > 0){
+                    ReferenceCountUtil.release(msg, cnt);
+                }
+                throw ex;
+            }
         }
     }
 

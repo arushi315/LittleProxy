@@ -907,14 +907,14 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
             pipeline.addLast(globalStateWrapperEvenLoop, "clientToProxyBytesWrittenMonitor", bytesWrittenMonitor);
         }
 
-        pipeline.addLast("clientToProxyProxyProtocolReader", new HttpProxyProtocolRequestDecoder());
+        pipeline.addLast("clientToProxyProxyProtocolReader", new HttpProxyProtocolRequestDecoder(LOG));
         
         pipeline.addLast("ClientToProxyCheckReferenceHandler", new CheckReferenceHandler());
 
         pipeline.addLast("encoder", new CustomHttpResponseEncoder());
         // We want to allow longer request lines, headers, and chunks
         // respectively.
-        pipeline.addLast("decoder", new HttpRequestDecoder(
+        pipeline.addLast("decoder", new CustomHttpRequestDecoder(
                 proxyServer.getMaxInitialLineLength(),
                 proxyServer.getMaxHeaderSize(),
                 proxyServer.getMaxChunkSize()));
@@ -968,12 +968,49 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
     private class CustomHttpResponseEncoder extends HttpResponseEncoder{
         @Override
         public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) throws Exception{
-            super.write(ctx, msg,promise);
-            final int refCnt = ReferenceCountUtil.refCnt(msg);
-            LOG.warn("VMWARE CustomHttpResponseEncoder - msg:{}, refCnt:{}",
-                    msg.hashCode(), refCnt);
+            try{
+                super.write(ctx, msg,promise);
+                final int refCnt = ReferenceCountUtil.refCnt(msg);
+                LOG.warn("VMWARE CustomHttpResponseEncoder - msg:{}, refCnt:{}",
+                        msg.hashCode(), refCnt);
+            }catch (Exception ex){
+                final int cnt = ReferenceCountUtil.refCnt(msg);
+                LOG.error("VMWARE CustomHttpResponseEncoder - msg:{}, refCnt:{}.", 
+                        msg.hashCode(), cnt, ex);
+                if(cnt > 0){
+                    ReferenceCountUtil.release(msg, cnt);
+                }
+                throw ex;
+            }
         }
     }
+    
+    private class CustomHttpRequestDecoder extends HttpRequestDecoder {
+       
+        public CustomHttpRequestDecoder(
+                int maxInitialLineLength, int maxHeaderSize, int maxChunkSize) {
+            super(maxInitialLineLength, maxHeaderSize, maxChunkSize, true);
+        }
+
+        @Override
+        public void channelRead(final ChannelHandlerContext ctx, final Object msg) throws Exception {
+            try{
+                super.channelRead(ctx, msg);
+                final int refCnt = ReferenceCountUtil.refCnt(msg);
+                LOG.warn("VMWARE CustomHttpRequestDecoder - msg:{}, refCnt:{}",
+                        msg.hashCode(), refCnt);
+            }catch (Exception ex){
+                final int cnt = ReferenceCountUtil.refCnt(msg);
+                LOG.error("VMWARE CustomHttpRequestDecoder - msg:{}, refCnt:{}.",
+                        msg.hashCode(), cnt, ex);
+                if(cnt > 0){
+                    ReferenceCountUtil.release(msg, cnt);
+                }
+                throw ex;
+            }
+        }
+    }
+            
     /**
      * This method takes care of closing client to proxy and/or proxy to server
      * connections after finishing a write.
