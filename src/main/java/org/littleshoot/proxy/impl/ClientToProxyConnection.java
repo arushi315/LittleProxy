@@ -22,6 +22,7 @@ import io.netty.handler.codec.http.HttpResponse;
 import io.netty.handler.codec.http.HttpResponseEncoder;
 import io.netty.handler.codec.http.HttpResponseStatus;
 import io.netty.handler.codec.http.HttpVersion;
+import io.netty.handler.timeout.IdleStateEvent;
 import io.netty.handler.timeout.IdleStateHandler;
 import io.netty.handler.traffic.GlobalTrafficShapingHandler;
 import io.netty.util.ReferenceCountUtil;
@@ -31,6 +32,7 @@ import io.netty.util.concurrent.Future;
 import io.netty.util.concurrent.GenericFutureListener;
 
 import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.lang3.exception.ExceptionUtils;
 import org.littleshoot.proxy.ActivityTracker;
 import org.littleshoot.proxy.DefaultFailureHttpResponseComposer;
 import org.littleshoot.proxy.ExceptionHandler;
@@ -370,13 +372,22 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
                         try {
                             wrapTask(() -> process(ctx, httpRequest, false)).run();
                         } catch (Exception e) {
+                            final int cnt = ReferenceCountUtil.refCnt(httpRequest);
+                            LOG.error("VMWARE channelRead ClientToProxyMessageProcessor exception - httpRequest:{}, refCnt:{}, ex:{}",
+                                    httpRequest.hashCode(), cnt, e.getMessage());
+                            if(ReferenceCountUtil.refCnt(httpRequest) > 0){
+                               ReferenceCountUtil.release(httpRequest, cnt);
+                            }
                             ctx.fireExceptionCaught(e);
                         } finally {
-                            LOG.debug("VMWARE channelRead ClientToProxyMessageProcessor - Releasing httpRequest:{}. refcnt: {}",
-                                    httpRequest.hashCode(), ReferenceCountUtil.refCnt(httpRequest));
-                            ReferenceCountUtil.release(httpRequest);
-                            LOG.debug("VMWARE channelRead ClientToProxyMessageProcessor - Released httpRequest:{}. refcnt: {}", 
-                                    httpRequest.hashCode(), ReferenceCountUtil.refCnt(httpRequest));
+                            if(ReferenceCountUtil.refCnt(httpRequest) > 0){
+                                LOG.debug("VMWARE channelRead ClientToProxyMessageProcessor - Releasing httpRequest:{}. refcnt: {}",
+                                        httpRequest.hashCode(), ReferenceCountUtil.refCnt(httpRequest));
+                                ReferenceCountUtil.release(httpRequest);
+                                LOG.debug("VMWARE channelRead ClientToProxyMessageProcessor - Released httpRequest:{}. refcnt: {}",
+                                        httpRequest.hashCode(), ReferenceCountUtil.refCnt(httpRequest));
+
+                            }
                         }
                     });
             }
@@ -427,10 +438,20 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
                                 ctx.fireChannelRead(
                                     new UpstreamConnectionHandler.Request(httpRequest, shortCircuitResponse))
                             ).run();
-                        } finally {
-                            ReferenceCountUtil.release(httpRequest);
-                            LOG.error("VMWARE process ClientToProxyMessageProcessor - Released httpRequest:{}. refcnt: {}", 
-                                    httpRequest.hashCode(), ReferenceCountUtil.refCnt(httpRequest));
+                        } catch(Exception ex){
+                            final int cnt = ReferenceCountUtil.refCnt(httpRequest);
+                            LOG.error("VMWARE process ClientToProxyMessageProcessor exception - httpRequest:{}, refCnt:{}, ex:{}",
+                                    httpRequest.hashCode(), cnt, ex.getMessage());
+                            if(ReferenceCountUtil.refCnt(httpRequest) > 0){
+                                ReferenceCountUtil.release(httpRequest, cnt);
+                            }
+                            ctx.fireExceptionCaught(ex);
+                        }finally {
+                            if(ReferenceCountUtil.refCnt(httpRequest) > 0){
+                                ReferenceCountUtil.release(httpRequest);
+                                LOG.error("VMWARE process ClientToProxyMessageProcessor - Released httpRequest:{}. refcnt: {}",
+                                        httpRequest.hashCode(), ReferenceCountUtil.refCnt(httpRequest));   
+                            }
                         }
                     });
                 }
@@ -573,9 +594,9 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
                     ReferenceCountUtil.refCnt(httpObject));
         }
         
-        if (ProxyUtils.isLastChunk(httpObject)) {
+      /*  if (ProxyUtils.isLastChunk(httpObject)) {
             writeEmptyBuffer();
-        }
+        }*/
 
         closeConnectionsAfterWriteIfNecessary(serverConnection,
                 currentHttpRequest, currentHttpResponse, httpObject);
@@ -933,7 +954,7 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
 
         pipeline.addLast(
                 "clientToProxyIdle",
-                new IdleStateHandler(0, 0, proxyServer
+                new CustomIdleStateHandler(0, 0, proxyServer
                         .getIdleConnectionTimeout()));
 
         if (proxyServer.getGlobalStateHandler() != null) {
@@ -945,6 +966,51 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
         pipeline.addLast(globalStateWrapperEvenLoop,  "clientToProxyMessageProcessor", new ClientToProxyMessageProcessor());
         pipeline.addLast(globalStateWrapperEvenLoop,  "upstreamConnectionHandler", new UpstreamConnectionHandler(this));
 
+    }
+    
+    private class CustomIdleStateHandler extends IdleStateHandler{
+
+        public CustomIdleStateHandler(final int readerIdleTimeSeconds, final int writerIdleTimeSeconds, final int allIdleTimeSeconds) {
+            super(readerIdleTimeSeconds, writerIdleTimeSeconds, allIdleTimeSeconds);
+        }
+
+        @Override
+        public void channelActive(final ChannelHandlerContext ctx) throws Exception {
+            super.channelActive(ctx);
+        }
+
+        @Override
+        public void channelRead(final ChannelHandlerContext ctx, final Object msg) throws Exception {
+            super.channelRead(ctx, msg);
+        }
+
+        @Override
+        public void channelReadComplete(final ChannelHandlerContext ctx) throws Exception {
+            super.channelReadComplete(ctx);
+        }
+
+        @Override
+        public void write(final ChannelHandlerContext ctx, final Object msg, final ChannelPromise promise) throws Exception {
+            super.write(ctx, msg, promise);
+        }
+
+        @Override
+        public void channelInactive(final ChannelHandlerContext ctx) throws Exception {
+            LOG.warn("VMWARE clientToProxyIdle CustomIdleStateHandler channelInactive ctx:{}", ctx.hashCode());
+            super.channelInactive(ctx);
+        }
+
+        @Override
+        protected void channelIdle(final ChannelHandlerContext ctx, final IdleStateEvent evt) throws Exception {
+            LOG.error("VMWARE clientToProxyIdle CustomIdleStateHandler channelIdle ctx:{}", ctx.hashCode());
+            super.channelIdle(ctx, evt);
+        }
+
+        @Override
+        public void exceptionCaught(final ChannelHandlerContext ctx, final Throwable cause) throws Exception {
+            LOG.error("VMWARE clientToProxyIdle CustomIdleStateHandler exceptionCaught ctx:{}, cause:{}", ctx.hashCode(), ExceptionUtils.getStackTrace(cause));
+            super.exceptionCaught(ctx, cause);
+        }
     }
 
     private class CheckReferenceHandler extends ChannelOutboundHandlerAdapter{
@@ -975,8 +1041,8 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
                         msg.hashCode(), refCnt);
             }catch (Exception ex){
                 final int cnt = ReferenceCountUtil.refCnt(msg);
-                LOG.error("VMWARE CustomHttpResponseEncoder - msg:{}, refCnt:{}.", 
-                        msg.hashCode(), cnt, ex);
+                LOG.error("VMWARE CustomHttpResponseEncoder - msg:{}, refCnt:{}. Ex:{}", 
+                        msg.hashCode(), cnt, ex.getMessage());
                 if(cnt > 0){
                     ReferenceCountUtil.release(msg, cnt);
                 }
@@ -1001,8 +1067,8 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
                         msg.hashCode(), refCnt);
             }catch (Exception ex){
                 final int cnt = ReferenceCountUtil.refCnt(msg);
-                LOG.error("VMWARE CustomHttpRequestDecoder - msg:{}, refCnt:{}.",
-                        msg.hashCode(), cnt, ex);
+                LOG.error("VMWARE CustomHttpRequestDecoder - msg:{}, refCnt:{}. Ex:{}",
+                        msg.hashCode(), cnt, ex.getMessage());
                 if(cnt > 0){
                     ReferenceCountUtil.release(msg, cnt);
                 }

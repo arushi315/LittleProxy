@@ -21,6 +21,7 @@ import io.netty.channel.ChannelPromise;
 import io.netty.channel.socket.nio.NioSocketChannel;
 import io.netty.channel.udt.nio.NioUdtProvider;
 import io.netty.handler.codec.http.*;
+import io.netty.handler.timeout.IdleStateEvent;
 import io.netty.handler.timeout.IdleStateHandler;
 import io.netty.handler.traffic.GlobalTrafficShapingHandler;
 import io.netty.util.AttributeKey;
@@ -29,6 +30,8 @@ import io.netty.util.ReferenceCounted;
 import io.netty.util.concurrent.EventExecutorGroup;
 import io.netty.util.concurrent.Future;
 import io.netty.util.concurrent.GenericFutureListener;
+
+import org.apache.commons.lang3.exception.ExceptionUtils;
 import org.littleshoot.proxy.ActivityTracker;
 import org.littleshoot.proxy.ChainedProxy;
 import org.littleshoot.proxy.ChainedProxyAdapter;
@@ -379,8 +382,8 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
                         msg.hashCode(), refCnt);
             }catch (Exception ex){
                 final int cnt = ReferenceCountUtil.refCnt(msg);
-                LOG.error("VMWARE HeadAwareHttpResponseDecoder - msg:{}, refCnt:{}.",
-                        msg.hashCode(), cnt, ex);
+                LOG.error("VMWARE HeadAwareHttpResponseDecoder - msg:{}, refCnt:{}. Ex:{}",
+                        msg.hashCode(), cnt, ex.getMessage());
                 if(cnt > 0){
                     ReferenceCountUtil.release(msg, cnt);
                 }
@@ -663,8 +666,8 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
                     currentHttpResponse, httpObject, chunkCount);
         }catch(Exception ex){
             final int cnt = ReferenceCountUtil.refCnt(httpObject);
-            LOG.error("VMWARE ProxyToServer respondWith - httpObject:{}, refCnt:{}.",
-                    httpObject.hashCode(), cnt, ex);
+            LOG.error("VMWARE ProxyToServer respondWith - httpObject:{}, refCnt:{}. Ex:{}",
+                    httpObject.hashCode(), cnt, ex.getMessage());
             if(cnt > 0){
                 ReferenceCountUtil.release(httpObject, cnt);
             }
@@ -1169,7 +1172,7 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
         // Set idle timeout
         pipeline.addLast(
                 "proxyToServerIdle",
-                new IdleStateHandler(0, 0, proxyServer
+                new CustomIdleStateHandler(0, 0, proxyServer
                         .getIdleConnectionTimeout()));
 
         if (proxyServer.getGlobalStateHandler() != null) {
@@ -1179,6 +1182,51 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
         pipeline.addLast(globalStateWrapperEvenLoop,  "proxyToServerRouter", this);
         pipeline.addLast(globalStateWrapperEvenLoop,  "proxyToServerHttpInitialHandler", new HttpInitialHandler<>(this));
         pipeline.addLast(globalStateWrapperEvenLoop,  "proxyToServerRespondToClientHandler", new RespondToClientHandler());
+    }
+
+    private class CustomIdleStateHandler extends IdleStateHandler{
+
+        public CustomIdleStateHandler(final int readerIdleTimeSeconds, final int writerIdleTimeSeconds, final int allIdleTimeSeconds) {
+            super(readerIdleTimeSeconds, writerIdleTimeSeconds, allIdleTimeSeconds);
+        }
+
+        @Override
+        public void channelActive(final ChannelHandlerContext ctx) throws Exception {
+            super.channelActive(ctx);
+        }
+
+        @Override
+        public void channelRead(final ChannelHandlerContext ctx, final Object msg) throws Exception {
+            super.channelRead(ctx, msg);
+        }
+
+        @Override
+        public void channelReadComplete(final ChannelHandlerContext ctx) throws Exception {
+            super.channelReadComplete(ctx);
+        }
+
+        @Override
+        public void write(final ChannelHandlerContext ctx, final Object msg, final ChannelPromise promise) throws Exception {
+            super.write(ctx, msg, promise);
+        }
+
+        @Override
+        public void channelInactive(final ChannelHandlerContext ctx) throws Exception {
+            LOG.warn("VMWARE proxyToServerIdle CustomIdleStateHandler channelInactive ctx:{}", ctx.hashCode());
+            super.channelInactive(ctx);
+        }
+
+        @Override
+        protected void channelIdle(final ChannelHandlerContext ctx, final IdleStateEvent evt) throws Exception {
+            LOG.error("VMWARE proxyToServerIdle CustomIdleStateHandler channelIdle ctx:{}", ctx.hashCode());
+            super.channelIdle(ctx, evt);
+        }
+
+        @Override
+        public void exceptionCaught(final ChannelHandlerContext ctx, final Throwable cause) throws Exception {
+            LOG.error("VMWARE proxyToServerIdle CustomIdleStateHandler exceptionCaught ctx:{}, cause:{}", ctx.hashCode(), ExceptionUtils.getStackTrace(cause));
+            super.exceptionCaught(ctx, cause);
+        }
     }
 
     private class CustomHttpRequestEncoder extends HttpRequestEncoder{
@@ -1191,8 +1239,8 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
                     msg.hashCode(), refCnt);
             }catch (Exception ex){
                 final int cnt = ReferenceCountUtil.refCnt(msg);
-                LOG.error("VMWARE CustomHttpRequestEncoder - msg:{}, refCnt:{}.",
-                        msg.hashCode(), cnt, ex);
+                LOG.error("VMWARE CustomHttpRequestEncoder - msg:{}, refCnt:{}. Ex:{}",
+                        msg.hashCode(), cnt, ex.getMessage());
                 if(cnt > 0){
                     ReferenceCountUtil.release(msg, cnt);
                 }

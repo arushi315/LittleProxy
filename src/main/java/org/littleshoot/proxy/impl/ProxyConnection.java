@@ -298,6 +298,11 @@ abstract class ProxyConnection<I extends HttpObject> extends
                 LOG.error("VMWARE  writeToChannel shortCircuit - Released httpObject:{}, refCnt:{}", msg.hashCode(),
                         ReferenceCountUtil.refCnt(msg));
             }*/
+            
+            if(!future.isSuccess()){
+                LOG.error("VMWARE writeToChannel - future unsuccessful msg:{}, refCnt:{}", msg.hashCode(), 
+                        ReferenceCountUtil.refCnt(msg));
+            }
         });
     }
 
