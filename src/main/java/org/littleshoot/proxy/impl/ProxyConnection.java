@@ -300,7 +300,7 @@ abstract class ProxyConnection<I extends HttpObject> extends
             }*/
             
             if(!future.isSuccess()){
-                LOG.error("VMWARE writeToChannel - future unsuccessful msg:{}, refCnt:{}", msg.hashCode(), 
+                LOG.warn("VMWARE writeToChannel - future unsuccessful msg:{}, refCnt:{}", msg.hashCode(), 
                         ReferenceCountUtil.refCnt(msg));
             }
         });

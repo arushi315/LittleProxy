@@ -935,7 +935,7 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
         pipeline.addLast("encoder", new CustomHttpResponseEncoder());
         // We want to allow longer request lines, headers, and chunks
         // respectively.
-        pipeline.addLast("decoder", new CustomHttpRequestDecoder(
+        pipeline.addLast("decoder", new HttpRequestDecoder(
                 proxyServer.getMaxInitialLineLength(),
                 proxyServer.getMaxHeaderSize(),
                 proxyServer.getMaxChunkSize()));
@@ -1055,7 +1055,7 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
        
         public CustomHttpRequestDecoder(
                 int maxInitialLineLength, int maxHeaderSize, int maxChunkSize) {
-            super(maxInitialLineLength, maxHeaderSize, maxChunkSize, true);
+            super(maxInitialLineLength, maxHeaderSize, maxChunkSize);
         }
 
         @Override
@@ -1066,10 +1066,13 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
                 LOG.warn("VMWARE CustomHttpRequestDecoder - msg:{}, refCnt:{}",
                         msg.hashCode(), refCnt);
             }catch (Exception ex){
+                LOG.error("Caught an exception on CustomHttpRequestDecoder", (Throwable)ex);
                 final int cnt = ReferenceCountUtil.refCnt(msg);
-                LOG.error("VMWARE CustomHttpRequestDecoder - msg:{}, refCnt:{}. Ex:{}",
-                        msg.hashCode(), cnt, ex.getMessage());
+//                LOG.error("VMWARE CustomHttpRequestDecoder - msg:{}, refCnt:{}. Ex:{}",
+//                        msg.hashCode(), cnt, ex.getMessage());
                 if(cnt > 0){
+                    LOG.error("VMWARE CustomHttpRequestDecoder - Releasing msg:{}, refCnt:{}", 
+                            msg.hashCode(), cnt);    
                     ReferenceCountUtil.release(msg, cnt);
                 }
                 throw ex;
