@@ -17,9 +17,11 @@ import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelOption;
 import io.netty.channel.ChannelPipeline;
+import io.netty.channel.ChannelPromise;
 import io.netty.channel.socket.nio.NioSocketChannel;
 import io.netty.channel.udt.nio.NioUdtProvider;
 import io.netty.handler.codec.http.*;
+import io.netty.handler.timeout.IdleStateEvent;
 import io.netty.handler.timeout.IdleStateHandler;
 import io.netty.handler.traffic.GlobalTrafficShapingHandler;
 import io.netty.util.AttributeKey;
@@ -28,6 +30,8 @@ import io.netty.util.ReferenceCounted;
 import io.netty.util.concurrent.EventExecutorGroup;
 import io.netty.util.concurrent.Future;
 import io.netty.util.concurrent.GenericFutureListener;
+
+import org.apache.commons.lang3.exception.ExceptionUtils;
 import org.littleshoot.proxy.ActivityTracker;
 import org.littleshoot.proxy.ChainedProxy;
 import org.littleshoot.proxy.ChainedProxyAdapter;
@@ -50,6 +54,7 @@ import java.util.List;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * <p>
@@ -77,6 +82,8 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
     private final String serverHostAndPort;
     private volatile ChainedProxy chainedProxy;
     private final Queue<ChainedProxy> availableChainedProxies;
+    
+    private final AtomicInteger chunkCount = new AtomicInteger(0);
 
     /**
      * The filters to apply to response/chunks received from server.
@@ -243,7 +250,8 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
     @Override
     protected ConnectionState readHTTPInitial(ChannelHandlerContext ctx, Object httpResponseObj) {
         HttpResponse httpResponse = (HttpResponse) httpResponseObj;
-        LOG.debug("Received raw response: {}", httpResponse);
+        LOG.debug("Received raw response: {}. httpResponse:{}, refcnt:{}", httpResponse, httpResponse.hashCode(), 
+                ReferenceCountUtil.refCnt(httpResponse));
 
         if (httpResponse.getDecoderResult().isFailure()) {
             LOG.debug("Could not parse response from server. Decoder result: {}", httpResponse.getDecoderResult().toString());
@@ -273,23 +281,35 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
         public void channelRead(ChannelHandlerContext ctx, Object msg) {
             final HttpResponse httpResponse = (HttpResponse) msg;
             if (ProxyUtils.isChunked(httpResponse)) {
-                respondWith(httpResponse);
+                respondWith(httpResponse, -1);
                 become(AWAITING_CHUNK);
             } else {
                 ReferenceCountUtil.retain(httpResponse);
-
+                LOG.debug("VMWARE channelRead RespondToClientHandler - Retained httpResponse:{}. refcnt: {}", 
+                        httpResponse.hashCode(), ReferenceCountUtil.refCnt(httpResponse));
                 proxyServer.getMessageProcessingExecutor()
                     .execute(() -> {
                       try {
                           clientConnection.wrapTask(() -> {
-                              respondWith(httpResponse);
+                              respondWith(httpResponse, -1);
                               currentFilters.serverToProxyResponseReceived();
                               become(AWAITING_INITIAL);
                           }).run();
                       } catch (Exception e) {
+                          final int cnt = ReferenceCountUtil.refCnt(httpResponse);
+                          if(cnt > 0){
+                              ReferenceCountUtil.release(httpResponse, cnt);
+                              LOG.error("VMWARE channelRead RespondToClientHandler exception - Released httpResponse:{}. refcnt: {}",
+                                      httpResponse.hashCode(), ReferenceCountUtil.refCnt(httpResponse));
+                          }
                           exceptionCaught(ctx, e);
                       } finally {
-                          ReferenceCountUtil.release(httpResponse);
+                          final int cnt = ReferenceCountUtil.refCnt(httpResponse);
+                          if(cnt > 0){ 
+                              ReferenceCountUtil.release(httpResponse);
+                              LOG.error("VMWARE channelRead RespondToClientHandler finally - Released httpResponse:{}. refcnt: {}",
+                                      httpResponse.hashCode(), ReferenceCountUtil.refCnt(httpResponse));
+                          }
                       }
                     });
             }
@@ -303,12 +323,16 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
 
     @Override
     protected void readHTTPChunk(HttpContent chunk) {
-        respondWith(chunk);
+
+        LOG.debug("VMWARE readHTTPChunk ProxyToClient - Chunk:{}. refcnt: {}", chunk.hashCode(), ReferenceCountUtil.refCnt(chunk));
+        respondWith(chunk, chunkCount.incrementAndGet());
+        
     }
 
     @Override
     protected void readRaw(ByteBuf buf) {
-        clientConnection.write(buf);
+        LOG.debug("VMWARE readRaw - writing to client - buf:{}, refCnt:{}", buf.hashCode(), ReferenceCountUtil.refCnt(buf));
+        clientConnection.write(buf, chunkCount.incrementAndGet());
     }
 
     /**
@@ -348,7 +372,25 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
                 return ProxyUtils.isHEAD(currentHttpRequest) || super.isContentAlwaysEmpty(httpMessage);
             }
         }
-    };
+
+        @Override
+        public void channelRead(final ChannelHandlerContext ctx, final Object msg) throws Exception {
+            try{
+                super.channelRead(ctx, msg);
+                final int refCnt = ReferenceCountUtil.refCnt(msg);
+                LOG.warn("VMWARE HeadAwareHttpResponseDecoder - msg:{}, refCnt:{}",
+                        msg.hashCode(), refCnt);
+            }catch (Exception ex){
+                final int cnt = ReferenceCountUtil.refCnt(msg);
+                LOG.error("VMWARE HeadAwareHttpResponseDecoder - msg:{}, refCnt:{}. Ex:{}",
+                        msg.hashCode(), cnt, ex.getMessage());
+                if(cnt > 0){
+                    ReferenceCountUtil.release(msg, cnt);
+                }
+                throw ex;
+            }
+        }
+    }
 
     /***************************************************************************
      * Writing
@@ -362,66 +404,93 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
      * @param filters
      */
     void write(Object msg, HttpFilters filters) {
-        this.currentFilters = filters;
-        write(msg);
+        try{
+            LOG.debug("Requested write proxyToServerConnection. msg:{}, refCnt:{}", msg.hashCode(), ReferenceCountUtil.refCnt(msg));
+            this.currentFilters = filters;
+            write(msg, -1);
+        }finally {
+            LOG.debug("Requested write finally proxyToServerConnection. msg:{}, refCnt:{}", msg.hashCode(), ReferenceCountUtil.refCnt(msg));
+        }
     }
 
     @Override
-    void write(Object msg) {
-        LOG.debug("Requested write of {}", msg);
+    void write(Object msg, int chunkCount) {
+       try{
+           LOG.debug("Requested write - chunkCount:{}, msg: {}, refCnt:{}", chunkCount, msg.hashCode(), ReferenceCountUtil.refCnt(msg));
 
-        if (msg instanceof ReferenceCounted) {
-            LOG.debug("Retaining reference counted message");
-            ((ReferenceCounted) msg).retain();
-        }
+           if (msg instanceof ReferenceCounted) {
+               ((ReferenceCounted) msg).retain();
+               LOG.debug("VMWARE write ProxytoServerConnection - Retained chunkCount:{}, msg:{}. refcnt: {}",
+                       chunkCount, msg.hashCode(), ReferenceCountUtil.refCnt(msg));
+           }
+           if (is(DISCONNECTED) && msg instanceof HttpRequest) {
+               LOG.debug("Currently disconnected, connect and then write the message");
+               connectAndWrite((HttpRequest) msg);
+           } else {
+               if (isConnecting()) {
+                   synchronized (connectLock) {
+                       if (isConnecting()) {
+                           LOG.debug("Attempted to write while still in the process of connecting, waiting for connection.");
+                           clientConnection.stopReading();
+                           try {
+                               connectLock.wait(30000);
+                           } catch (InterruptedException ie) {
+                               LOG.warn("Interrupted while waiting for connect monitor");
+                           }
+                       }
+                   }
+               }
 
-        if (is(DISCONNECTED) && msg instanceof HttpRequest) {
-            LOG.debug("Currently disconnected, connect and then write the message");
-            connectAndWrite((HttpRequest) msg);
-        } else {
-            if (isConnecting()) {
-                synchronized (connectLock) {
-                    if (isConnecting()) {
-                        LOG.debug("Attempted to write while still in the process of connecting, waiting for connection.");
-                        clientConnection.stopReading();
-                        try {
-                            connectLock.wait(30000);
-                        } catch (InterruptedException ie) {
-                            LOG.warn("Interrupted while waiting for connect monitor");
-                        }
-                    }
-                }
-            }
+               // only write this message if a connection was established and is not in the process of disconnecting or
+               // already disconnected
+               if (isConnecting() || getCurrentState().isDisconnectingOrDisconnected()) {
+                   LOG.debug("Connection failed or timed out while waiting to write message to server. Message will be discarded: {}", msg);
 
-            // only write this message if a connection was established and is not in the process of disconnecting or
-            // already disconnected
-            if (isConnecting() || getCurrentState().isDisconnectingOrDisconnected()) {
-                LOG.debug("Connection failed or timed out while waiting to write message to server. Message will be discarded: {}", msg);
+                   // release when disconnected.
+                   if (initialRequest instanceof ReferenceCounted) {
+//                    ((ReferenceCounted)initialRequest).release();
+                       final int refCnt = ReferenceCountUtil.refCnt(initialRequest);
+                       ReferenceCountUtil.release(initialRequest, refCnt);
+                       LOG.debug("VMWARE write ProxytoServerCon - releasing msg/initialRequest:{}. refCount: {}",
+                               initialRequest.hashCode(), ReferenceCountUtil.refCnt(initialRequest));
+                   }
 
-                // release when disconnected.
-                if (initialRequest instanceof ReferenceCounted) {
-                    ((ReferenceCounted)initialRequest).release();
-                }
+                   //TODO: Made this change
+                   if (msg instanceof ReferenceCounted) {
+                       ReferenceCountUtil.release(msg);
+                       LOG.debug("VMWARE Connection failed or timed out - released msg:{}. refCount: {}",
+                               msg.hashCode(), ReferenceCountUtil.refCnt(msg));
+                   }
+                   return;
+               }
 
-                return;
-            }
-
-            LOG.debug("Using existing connection to: {}", remoteAddress);
-            doWrite(msg);
-        }
-    };
+               LOG.debug("Using existing connection to: {}. msg:{}, refCnt:{}",
+                       remoteAddress, msg.hashCode(), ReferenceCountUtil.refCnt(msg));
+               doWrite(msg, chunkCount);
+           }
+       }finally {
+           LOG.debug("VMWARE proxytoServerConnection after doWrite. msg:{}, refCnt:{}", 
+                   msg.hashCode(), ReferenceCountUtil.refCnt(msg));
+       }
+    }
 
     @Override
-    protected void writeHttp(HttpObject httpObject) {
-        if (chainedProxy != null) {
-            chainedProxy.filterRequest(httpObject);
-        }
-        if (httpObject instanceof HttpRequest) {
-            HttpRequest httpRequest = (HttpRequest) httpObject;
-            // Remember that we issued this HttpRequest for later
-            currentHttpRequest = httpRequest;
-        }
-        super.writeHttp(httpObject);
+    protected void writeHttp(HttpObject httpObject, int chunkCount) {
+       try{
+           LOG.debug("VMWARE ProxyToServerConnection writeHttp - chunkCount:{}, HttpObject:{}, refCnt:{}", 
+                   chunkCount, httpObject.hashCode(), ReferenceCountUtil.refCnt(httpObject));
+           if (chainedProxy != null) {
+               chainedProxy.filterRequest(httpObject);
+           }
+           if (httpObject instanceof HttpRequest) {
+               HttpRequest httpRequest = (HttpRequest) httpObject;
+               // Remember that we issued this HttpRequest for later
+               currentHttpRequest = httpRequest;
+           }
+           super.writeHttp(httpObject, chunkCount);
+       }finally {
+           LOG.debug("VMWARE ProxyToServerConnection after super.writeHttp - HttpObject:{}, refCnt:{}", httpObject.hashCode(), ReferenceCountUtil.refCnt(httpObject));
+       }
     }
 
     /***************************************************************************
@@ -575,6 +644,8 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
         // connection (which may not happen for a while for large, chunked
         // responses, for example).
         currentHttpResponse = ProxyUtils.copyMutableResponseFields(response);
+        LOG.debug("VMWARE rememberCurrentResponse -  currentHttpResponse:{}, refCnt:{}", 
+                currentHttpResponse.hashCode(), ReferenceCountUtil.refCnt(currentHttpResponse));
     }
 
     /**
@@ -582,9 +653,29 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
      * 
      * @param httpObject
      */
-    private void respondWith(HttpObject httpObject) {
-        clientConnection.respond(this, currentFilters, currentHttpRequest,
-                currentHttpResponse, httpObject);
+    private void respondWith(HttpObject httpObject, int chunkCount) {
+        try{
+            LOG.debug("VMWARE respondWith to client. chunkCount:{}, httpObject:{}, refCnt:{}", chunkCount, httpObject.hashCode(), 
+                    ReferenceCountUtil.refCnt(httpObject));
+            LOG.debug("VMWARE respondWith - currentHttpRequest:{}, refCnt:{}", currentHttpRequest.hashCode(),
+                    ReferenceCountUtil.refCnt(currentHttpRequest));
+            LOG.debug("VMWARE respondWith - currentHttpResponse:{}, refCnt:{}", currentHttpResponse.hashCode(),
+                    ReferenceCountUtil.refCnt(currentHttpResponse));
+            
+            clientConnection.respond(this, currentFilters, currentHttpRequest,
+                    currentHttpResponse, httpObject, chunkCount);
+        }catch(Exception ex){
+            final int cnt = ReferenceCountUtil.refCnt(httpObject);
+            LOG.error("VMWARE ProxyToServer respondWith - httpObject:{}, refCnt:{}. Ex:{}",
+                    httpObject.hashCode(), cnt, ex.getMessage());
+            if(cnt > 0){
+                ReferenceCountUtil.release(httpObject, cnt);
+            }
+            throw ex;
+        }finally {
+            LOG.debug("VMWARE AFTER respondWith to client. chunkCount:{}, httpObject:{}, refCnt:{}", chunkCount, httpObject.hashCode(),
+                    ReferenceCountUtil.refCnt(httpObject));
+        }
     }
 
     /**
@@ -609,6 +700,7 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
      * handling CONNECTs.
      */
     private void initializeConnectionFlow() {
+        LOG.debug("VMWARE - initializeConnectionFlow");
         this.connectionFlow = new ConnectionFlow(clientConnection, this,
                 connectLock)
                 .then(ConnectChannel);
@@ -635,6 +727,7 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
             boolean isMitmEnabled = mitmManager != null;
 
             if (isMitmEnabled) {
+                LOG.debug("VMWARE initializeConnectionFlow - MITM enabled.");
                 // When MITM is enabled and when chained proxy is set up, remoteAddress
                 // will be the chained proxy's address. So we use serverHostAndPort
                 // which is the end server's address.
@@ -747,22 +840,24 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
 
                 LOG.debug("Retaining reference counted message");
                 ((ReferenceCounted) initialRequest).retain();
+                LOG.debug("VMWARE ConnectionFlowStep - Retaining initialRequest. refcnt: {}", 
+                        ReferenceCountUtil.refCnt(initialRequest));
             }
 
             if(isMitmEnabled){
-                ChannelFuture future = writeToChannel(initialRequest);
+                ChannelFuture future = writeToChannel(initialRequest, -1);
                 future.addListener(new ChannelFutureListener() {
 
                     @Override
                     public void operationComplete(ChannelFuture arg0) throws Exception {
                         if(arg0.isSuccess()){
-                            writeToChannel(LastHttpContent.EMPTY_LAST_CONTENT);
+                            writeToChannel(LastHttpContent.EMPTY_LAST_CONTENT, -2);
                         }
                     }
                 });
             	return future;
             } else {
-                return writeToChannel(initialRequest);
+                return writeToChannel(initialRequest, -1);
             }
         }
 
@@ -807,7 +902,7 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
             chainedProxy.getNtlmHandler().negotiate(request);
             currentHttpRequest = request;
             LOG.debug("NTLM negotiate message: {}", request);
-            return writeToChannel(request);
+            return writeToChannel(request, -6);
         }
 
         void onSuccess(ConnectionFlow flow) {
@@ -838,11 +933,12 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
         }
     };
 
-    private static HttpRequest copyAsFull(HttpRequest origin) {
+    private HttpRequest copyAsFull(HttpRequest origin) {
         HttpRequest request = null;
         if (origin instanceof FullHttpRequest) {
             request = origin;
             ReferenceCountUtil.retain(request);
+            LOG.debug("VMWARE copyAsFull ProxytoServerCon - Retained request:{}. refcnt: {}", request.hashCode(), ReferenceCountUtil.refCnt(request));
         } else {
             request = new DefaultFullHttpRequest(origin.getProtocolVersion(), origin.getMethod(), origin.getUri());
             if(origin.headers() != null){
@@ -1052,11 +1148,11 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
             for (final ActivityTracker activityTracker : proxyServer.getActivityTrackers()) {
                 LOG.debug("Activity Tracker: {}", activityTracker.getClass());
             }
-            pipeline.addLast(globalStateWrapperEvenLoop, "bytesReadMonitor", bytesReadMonitor);
-            pipeline.addLast(globalStateWrapperEvenLoop, "bytesWrittenMonitor", bytesWrittenMonitor);
+            pipeline.addLast(globalStateWrapperEvenLoop, "proxyToServerBytesReadMonitor", bytesReadMonitor);
+            pipeline.addLast(globalStateWrapperEvenLoop, "proxyToServerBytesWrittenMonitor", bytesWrittenMonitor);
         }
 
-        pipeline.addLast("encoder", new HttpRequestEncoder());
+        pipeline.addLast("encoder", new CustomHttpRequestEncoder());
         pipeline.addLast("decoder", new HeadAwareHttpResponseDecoder(
         		proxyServer.getMaxInitialLineLength(),
                 proxyServer.getMaxHeaderSize(),
@@ -1075,17 +1171,82 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
 
         // Set idle timeout
         pipeline.addLast(
-                "idle",
-                new IdleStateHandler(0, 0, proxyServer
+                "proxyToServerIdle",
+                new CustomIdleStateHandler(0, 0, proxyServer
                         .getIdleConnectionTimeout()));
 
         if (proxyServer.getGlobalStateHandler() != null) {
             pipeline.addLast("outboundGlobalStateHandler", new OutboundGlobalStateHandler(clientConnection));
         }
 
-        pipeline.addLast(globalStateWrapperEvenLoop,  "router", this);
-        pipeline.addLast(globalStateWrapperEvenLoop,  "httpInitialHandler", new HttpInitialHandler<>(this));
-        pipeline.addLast(globalStateWrapperEvenLoop,  "respondToClientHandler", new RespondToClientHandler());
+        pipeline.addLast(globalStateWrapperEvenLoop,  "proxyToServerRouter", this);
+        pipeline.addLast(globalStateWrapperEvenLoop,  "proxyToServerHttpInitialHandler", new HttpInitialHandler<>(this));
+        pipeline.addLast(globalStateWrapperEvenLoop,  "proxyToServerRespondToClientHandler", new RespondToClientHandler());
+    }
+
+    private class CustomIdleStateHandler extends IdleStateHandler{
+
+        public CustomIdleStateHandler(final int readerIdleTimeSeconds, final int writerIdleTimeSeconds, final int allIdleTimeSeconds) {
+            super(readerIdleTimeSeconds, writerIdleTimeSeconds, allIdleTimeSeconds);
+        }
+
+        @Override
+        public void channelActive(final ChannelHandlerContext ctx) throws Exception {
+            super.channelActive(ctx);
+        }
+
+        @Override
+        public void channelRead(final ChannelHandlerContext ctx, final Object msg) throws Exception {
+            super.channelRead(ctx, msg);
+        }
+
+        @Override
+        public void channelReadComplete(final ChannelHandlerContext ctx) throws Exception {
+            super.channelReadComplete(ctx);
+        }
+
+        @Override
+        public void write(final ChannelHandlerContext ctx, final Object msg, final ChannelPromise promise) throws Exception {
+            super.write(ctx, msg, promise);
+        }
+
+        @Override
+        public void channelInactive(final ChannelHandlerContext ctx) throws Exception {
+            LOG.warn("VMWARE proxyToServerIdle CustomIdleStateHandler channelInactive ctx:{}", ctx.hashCode());
+            super.channelInactive(ctx);
+        }
+
+        @Override
+        protected void channelIdle(final ChannelHandlerContext ctx, final IdleStateEvent evt) throws Exception {
+            LOG.error("VMWARE proxyToServerIdle CustomIdleStateHandler channelIdle ctx:{}", ctx.hashCode());
+            super.channelIdle(ctx, evt);
+        }
+
+        @Override
+        public void exceptionCaught(final ChannelHandlerContext ctx, final Throwable cause) throws Exception {
+            LOG.error("VMWARE proxyToServerIdle CustomIdleStateHandler exceptionCaught ctx:{}, cause:{}", ctx.hashCode(), ExceptionUtils.getStackTrace(cause));
+            super.exceptionCaught(ctx, cause);
+        }
+    }
+
+    private class CustomHttpRequestEncoder extends HttpRequestEncoder{
+        @Override
+        public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) throws Exception{
+            try{
+                super.write(ctx, msg,promise);
+                final int refCnt = ReferenceCountUtil.refCnt(msg);
+                LOG.warn("VMWARE CustomHttpRequestEncoder - msg:{}, refCnt:{}",
+                    msg.hashCode(), refCnt);
+            }catch (Exception ex){
+                final int cnt = ReferenceCountUtil.refCnt(msg);
+                LOG.error("VMWARE CustomHttpRequestEncoder - msg:{}, refCnt:{}. Ex:{}",
+                        msg.hashCode(), cnt, ex.getMessage());
+                if(cnt > 0){
+                    ReferenceCountUtil.release(msg, cnt);
+                }
+                throw ex;
+            }
+        }
     }
 
     /**
@@ -1115,10 +1276,11 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
             boolean shouldWrite = ntlmAuthenticate(initialRequest);
             if(shouldWrite) {
                 LOG.debug("Writing initial request: {}", initialRequest);
-                write(initialRequest);
+                write(initialRequest, -1);
             }
         } else {
-            LOG.debug("Dropping initial request: {}", initialRequest);
+            LOG.debug("VMWARE - Dropping initial request: {}, refCnt: {}", initialRequest.hashCode(), 
+                    ReferenceCountUtil.refCnt(initialRequest));
         }
 
     }
@@ -1219,7 +1381,12 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
                     tracker.requestSentToServer(flowContext, httpRequest);
                 }
             } catch (Throwable t) {
-                LOG.warn("Error while invoking ActivityTracker on request", t);
+                final int refCnt = ReferenceCountUtil.refCnt(httpRequest);
+                LOG.error("VMWARE monitor requestWrittenMonitor - httpRequest:{}, refCnt:{}, exception:{}",
+                        httpRequest.hashCode(), refCnt, t.getMessage());
+               /* if(refCnt > 0){
+                    ReferenceCountUtil.safeRelease(httpRequest, refCnt);
+                }*/
             }
 
             currentFilters.proxyToServerRequestSending();

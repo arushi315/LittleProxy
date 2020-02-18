@@ -6,6 +6,7 @@ import io.netty.channel.*;
 import io.netty.handler.codec.http.*;
 import io.netty.handler.ssl.SslHandler;
 import io.netty.handler.timeout.IdleStateEvent;
+import io.netty.util.ReferenceCountUtil;
 import io.netty.util.ReferenceCounted;
 import io.netty.util.concurrent.Future;
 import io.netty.util.concurrent.GenericFutureListener;
@@ -109,7 +110,7 @@ abstract class ProxyConnection<I extends HttpObject> extends
      * @param msg
      */
     protected void read(Object msg) {
-        LOG.debug("Reading: {}", msg);
+        LOG.debug("Reading: {}, refCnt:{}", msg.hashCode(), ReferenceCountUtil.refCnt(msg));
 
         lastReadTime = System.currentTimeMillis();
 
@@ -139,6 +140,13 @@ abstract class ProxyConnection<I extends HttpObject> extends
                 // response from a filter. The client may have sent some chunked HttpContent associated with the request
                 // after the short-circuit response was sent. We can safely drop them.
                 LOG.debug("Dropping message because HTTP object was not an HttpMessage. HTTP object may be orphaned content from a short-circuited response. Message: {}", httpObject);
+                LOG.debug("VMWARE readHTTP - AWAITING_INITIAL httpObject:{}. refCnt:{}", 
+                        httpObject.hashCode(), ReferenceCountUtil.refCnt(httpObject));
+                /*try {
+                    ReferenceCountUtil.release(httpObject, ReferenceCountUtil.refCnt(httpObject));
+                }catch (Exception ex){
+                    LOG.error("VMWARE - UNABLE TO RELEASE: AWAITING_INITIAL", ex.getMessage());
+                }*/
             }
             break;
         case AWAITING_CHUNK:
@@ -176,6 +184,13 @@ abstract class ProxyConnection<I extends HttpObject> extends
         case DISCONNECT_REQUESTED:
         case DISCONNECTED:
             LOG.info("Ignoring message since the connection is closed or about to close");
+            LOG.debug("VMWARE readHTTP - DISCONNECTED httpObject:{}. refCnt:{}",
+                    httpObject.hashCode(), ReferenceCountUtil.refCnt(httpObject));
+            /*try {
+                ReferenceCountUtil.release(httpObject, ReferenceCountUtil.refCnt(httpObject));
+            }catch (Exception ex){
+                LOG.error("VMWARE - UNABLE TO RELEASE: DISCONNECTED", ex.getMessage());
+            }*/
             break;
         }
     }
@@ -214,26 +229,28 @@ abstract class ProxyConnection<I extends HttpObject> extends
      * 
      * @param msg
      */
-    void write(Object msg) {
+    void write(Object msg, int chunkCount) {
         if (msg instanceof ReferenceCounted) {
-            LOG.debug("Retaining reference counted message");
+            LOG.debug("Retaining reference counted message. chunkCount:{}, msg:{}, refCnt:{}", 
+                    chunkCount, msg.hashCode(), ReferenceCountUtil.refCnt(msg));
             ((ReferenceCounted) msg).retain();
+            LOG.debug("VMWARE ProxyConnection write - Retained. chunkCount:{}, msg:{}, refcnt: {}", 
+                    chunkCount, msg.hashCode(), ReferenceCountUtil.refCnt(msg));
         }
-
-        doWrite(msg);
+        doWrite(msg, chunkCount);
     }
 
-    void doWrite(Object msg) {
-        LOG.debug("Writing: {}", msg);
+    void doWrite(Object msg, int chunkCount) {
+        LOG.debug("Writing doWrite -  chunkCount:{} msg:{}, refCnt:{}", chunkCount, msg.hashCode(), ReferenceCountUtil.refCnt(msg));
 
         try {
             if (msg instanceof HttpObject) {
-                writeHttp((HttpObject) msg);
+                writeHttp((HttpObject) msg, chunkCount);
             } else {
-                writeRaw((ByteBuf) msg);
+                writeRaw((ByteBuf) msg, chunkCount);
             }
         } finally {
-            LOG.debug("Wrote: {}", msg);
+            LOG.debug("Wrote doWrite - chunkCount{}. msg:{}, refCnt:{}", chunkCount, msg.hashCode(), ReferenceCountUtil.refCnt(msg));
         }
     }
 
@@ -242,13 +259,19 @@ abstract class ProxyConnection<I extends HttpObject> extends
      * 
      * @param httpObject
      */
-    protected void writeHttp(HttpObject httpObject) {
+    protected void writeHttp(HttpObject httpObject, int chunkCount) {
         if (ProxyUtils.isLastChunk(httpObject)) {
-            channel.write(httpObject);
+            // TODO: Made this change
+            channel.writeAndFlush(httpObject).addListener(future -> {
+                final int refCnt = ReferenceCountUtil.refCnt(httpObject);
+                LOG.warn("VMWARE writeHttp Lastchunk - httpObject:{}, refCnt:{}", httpObject.hashCode(),
+                        refCnt);
+            });
             LOG.debug("Writing an empty buffer to signal the end of our chunked transfer");
-            writeToChannel(Unpooled.EMPTY_BUFFER);
+            writeToChannel(Unpooled.EMPTY_BUFFER, chunkCount);
         } else {
-            writeToChannel(httpObject);
+            LOG.debug("Writing - writeHttp ProxyConnection. chunkCount:{}", chunkCount);
+            writeToChannel(httpObject, chunkCount); 
         }
     }
 
@@ -257,12 +280,30 @@ abstract class ProxyConnection<I extends HttpObject> extends
      * 
      * @param buf
      */
-    protected void writeRaw(ByteBuf buf) {
-        writeToChannel(buf);
+    protected void writeRaw(ByteBuf buf, int chunkCount) {
+        LOG.debug("VMWARE writeRaw ProxyConnection - chunkCount:{}, msg:{}. refCnt: {}",
+                chunkCount, buf.hashCode(), ReferenceCountUtil.refCnt(buf));
+        writeToChannel(buf, chunkCount);
     }
 
-    protected ChannelFuture writeToChannel(final Object msg) {
-        return channel.writeAndFlush(msg);
+    protected ChannelFuture writeToChannel(final Object msg, int chunkCount) {
+        return channel.writeAndFlush(msg).addListener(future -> {
+                int refCnt = ReferenceCountUtil.refCnt(msg);
+                LOG.warn("VMWARE writeToChannel ProxyConnection - chunkCount:{}, msg:{}. refCnt: {}", 
+                            chunkCount, msg.hashCode(), refCnt);
+
+            /*    refCnt--;
+            if(refCnt > 0 && tunneling){
+                ReferenceCountUtil.release(msg, refCnt);
+                LOG.error("VMWARE  writeToChannel shortCircuit - Released httpObject:{}, refCnt:{}", msg.hashCode(),
+                        ReferenceCountUtil.refCnt(msg));
+            }*/
+            
+            if(!future.isSuccess()){
+                LOG.warn("VMWARE writeToChannel - future unsuccessful msg:{}, refCnt:{}", msg.hashCode(), 
+                        ReferenceCountUtil.refCnt(msg));
+            }
+        });
     }
 
     /***************************************************************************
@@ -318,6 +359,7 @@ abstract class ProxyConnection<I extends HttpObject> extends
 
         protected Future execute() {
             try {
+                LOG.debug("VMWARE StartTunneling - Removing handlers.");
                 ChannelPipeline pipeline = ctx.pipeline();
                 if (pipeline.get("encoder") != null) {
                     pipeline.remove("encoder");
@@ -375,9 +417,9 @@ abstract class ProxyConnection<I extends HttpObject> extends
         if (null != channel) {
             channel.config().setAutoRead(true);
         }
-        SslHandler handler = new SslHandler(sslEngine);
+        CustomSslHandler handler = new CustomSslHandler(sslEngine);
         if(pipeline.get("ssl") == null) {
-            pipeline.addFirst("ssl", handler);
+            pipeline.addFirst("customSsl", handler);
         } else {
             // The second SSL handler is added to handle the case
             // where the proxy (running as MITM) has to chain with
@@ -386,6 +428,27 @@ abstract class ProxyConnection<I extends HttpObject> extends
             pipeline.addAfter("ssl", "sslWithServer", handler);
         }
         return handler.handshakeFuture();
+    }
+    
+    private class CustomSslHandler extends SslHandler {
+
+        public CustomSslHandler(final SSLEngine engine) {
+            super(engine);
+        }
+
+        @Override
+        public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) throws Exception{
+                /*if(refCnt > 1){
+                    ReferenceCountUtil.release(msg);
+                    LOG.warn("VMWARE CheckReferenceHandler - Released msg buffer msg:{}, refCnt:{}",
+                            msg.hashCode(), ReferenceCountUtil.refCnt(msg));
+                }*/
+            super.write(ctx, msg,promise);
+            int refCnt = ReferenceCountUtil.refCnt(msg);
+            LOG.warn("VMWARE CustomSslHandler - msg:{}, refCnt:{}",
+                    msg.hashCode(), refCnt);
+        }
+        
     }
 
     /**
@@ -462,7 +525,7 @@ abstract class ProxyConnection<I extends HttpObject> extends
             return null;
         } else {
             final Promise<Void> promise = channel.newPromise();
-            writeToChannel(Unpooled.EMPTY_BUFFER).addListener(
+            writeToChannel(Unpooled.EMPTY_BUFFER, -2).addListener(
                     new GenericFutureListener<Future<? super Void>>() {
                         @Override
                         public void operationComplete(
@@ -686,7 +749,12 @@ abstract class ProxyConnection<I extends HttpObject> extends
                     bytesRead(((ByteBuf) msg).readableBytes());
                 }
             } catch (Throwable t) {
-                LOG.warn("Unable to record bytesRead", t);
+                final int refCnt = ReferenceCountUtil.refCnt(msg);
+                LOG.error("VMWARE monitor BytesReadMonitor - msg:{}, refCnt:{}, exception:{}", 
+                        msg.hashCode(), refCnt, t.getMessage());
+                /*if(refCnt > 0){
+                    ReferenceCountUtil.safeRelease(msg, refCnt);
+                }*/
             } finally {
                 super.channelRead(ctx, msg);
             }
@@ -709,7 +777,12 @@ abstract class ProxyConnection<I extends HttpObject> extends
                     requestRead((HttpRequest) msg);
                 }
             } catch (Throwable t) {
-                LOG.warn("Unable to record bytesRead", t);
+                final int refCnt = ReferenceCountUtil.refCnt(msg);
+                LOG.error("VMWARE monitor RequestReadMonitor - msg:{}, refCnt:{}, exception:{}",
+                        msg.hashCode(), refCnt, t.getMessage());
+                /*if(refCnt > 0){
+                    ReferenceCountUtil.safeRelease(msg, refCnt);
+                }*/
             } finally {
                 super.channelRead(ctx, msg);
             }
@@ -732,7 +805,12 @@ abstract class ProxyConnection<I extends HttpObject> extends
                     responseRead((HttpResponse) msg);
                 }
             } catch (Throwable t) {
-                LOG.warn("Unable to record bytesRead", t);
+                final int refCnt = ReferenceCountUtil.refCnt(msg);
+                LOG.error("VMWARE monitor ResponseReadMonitor - msg:{}, refCnt:{}, exception:{}",
+                        msg.hashCode(), refCnt, t.getMessage());
+                /*if(refCnt > 0){
+                    ReferenceCountUtil.safeRelease(msg, refCnt);
+                }*/
             } finally {
                 super.channelRead(ctx, msg);
             }
@@ -755,7 +833,12 @@ abstract class ProxyConnection<I extends HttpObject> extends
             try {
                 proxyServer.getRequestTracer().start(clientToProxyConnection.channel);
             } catch (Throwable t) {
-                LOG.warn("Unable to start tracing request", t);
+                final int refCnt = ReferenceCountUtil.refCnt(msg);
+                LOG.error("VMWARE monitor RequestTracerHandler channelRead- msg:{}, refCnt:{}, exception:{}",
+                        msg.hashCode(), refCnt, t.getMessage());
+                /*if(refCnt > 0){
+                    ReferenceCountUtil.safeRelease(msg, refCnt);
+                }*/
             } finally {
                 super.channelRead(ctx, msg);
             }
@@ -770,7 +853,13 @@ abstract class ProxyConnection<I extends HttpObject> extends
                 try {
                     proxyServer.getRequestTracer().finish(clientToProxyConnection.channel);
                 } catch (Throwable t) {
-                    LOG.warn("Unable to finish request tracing", t);
+                    LOG.error("Unable to finish request tracing", t);
+                    final int refCnt = ReferenceCountUtil.refCnt(msg);
+                    LOG.error("VMWARE monitor RequestTracerHandler write - msg:{}, refCnt:{}, exception:{}",
+                            msg.hashCode(), refCnt, t.getMessage());
+                    /*if(refCnt > 0){
+                        ReferenceCountUtil.safeRelease(msg, refCnt);
+                    }*/
                 }
             }
         }
@@ -847,7 +936,12 @@ abstract class ProxyConnection<I extends HttpObject> extends
                     bytesWritten(((ByteBuf) msg).readableBytes());
                 }
             } catch (Throwable t) {
-                LOG.warn("Unable to record bytesRead", t);
+                final int refCnt = ReferenceCountUtil.refCnt(msg);
+                LOG.error("VMWARE monitor BytesWrittenMonitor - msg:{}, refCnt:{}, exception:{}",
+                        msg.hashCode(), refCnt, t.getMessage());
+                /*if(refCnt > 0){
+                    ReferenceCountUtil.safeRelease(msg, refCnt);
+                }*/
             } finally {
                 super.write(ctx, msg, promise);
             }
@@ -912,11 +1006,19 @@ abstract class ProxyConnection<I extends HttpObject> extends
                 Object msg, ChannelPromise promise)
                 throws Exception {
             try {
+                LOG.warn("VMWARE ResponseWrittenMonitor - msg:{}, refCnt:{}",
+                        msg.hashCode(), ReferenceCountUtil.refCnt(msg));
                 if (msg instanceof HttpResponse) {
+                    LOG.warn("VMWARE ResponseWrittenMonitor - responseWritten called.");
                     responseWritten(((HttpResponse) msg));
                 }
             } catch (Throwable t) {
-                LOG.warn("Error while invoking responseWritten callback", t);
+                final int refCnt = ReferenceCountUtil.refCnt(msg);
+                LOG.error("VMWARE monitor ResponseWrittenMonitor - msg:{}, refCnt:{}, exception:{}",
+                        msg.hashCode(), refCnt, t.getMessage());
+                /*if(refCnt > 0){
+                    ReferenceCountUtil.safeRelease(msg, refCnt);
+                }*/
             } finally {
                 super.write(ctx, msg, promise);
             }
