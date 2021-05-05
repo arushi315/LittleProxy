@@ -402,7 +402,10 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
                 if (initialRequest instanceof ReferenceCounted) {
                     ((ReferenceCounted)initialRequest).release();
                 }
-
+                if (msg instanceof ReferenceCounted) {
+                    ((ReferenceCounted) msg).release();
+                    LOG.debug("Connection failed or timed out, released message buffer");
+                }
                 return;
             }
 
